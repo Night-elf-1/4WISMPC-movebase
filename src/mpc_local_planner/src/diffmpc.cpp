@@ -5,8 +5,9 @@
 std::vector<double> diffMpcController::calculateReferenceSpeeds(const std::vector<double>& curvatures, const double& max_speed) {
     std::vector<double> referenceSpeeds;
     for (double k : curvatures) {
-        double speed = max_speed * (1 - 3 * std::abs(k));
-        speed = std::max(1.0, std::min(max_speed, speed));
+        // 用倒数曲线根据曲率限速，避免大曲率处速度为负
+        double speed = max_speed / (1.0 + 3.0 * std::fabs(k));
+        speed = std::max(0.05, std::min(max_speed, speed));
         referenceSpeeds.push_back(speed);
     }
     return referenceSpeeds;
@@ -509,7 +510,6 @@ Eigen::VectorXd diffMpcController::mpc_solve(std::vector<double>& cx, std::vecto
     double y   = inital_x(1);
     double yaw = inital_x(2);
 
-    static int target_ind_state = min_index; 
     if (target_ind_state < min_index) target_ind_state = min_index;
     // 参考路径发布器以 0.5m 为间隔采样，dl 取 0.5 保证预测时域按实际弧长步进
     M_XREF_DIFF traj_ref = build_horizon_reference(min_index, cx, cy, cyaw, speed, 0.5,

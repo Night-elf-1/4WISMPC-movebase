@@ -36,6 +36,7 @@ private:
     double getYaw(const geometry_msgs::Quaternion& q) const;
     bool getRobotPose(Eigen::Vector3d& state) const;
     void convertPlanToReference(const std::vector<geometry_msgs::PoseStamped>& plan);
+    std::vector<double> smoothVector(const std::vector<double>& data, int window) const;
     std::tuple<int, double> calcForwardNearestIndex(double current_x, double current_y);
     void publishWheelCommands(const Eigen::VectorXd& U);
     void publishZeroCommands();

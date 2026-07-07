@@ -99,9 +99,16 @@ class diffMpcController {
 public:
     int NX, NU, NP, NC;
     Eigen::VectorXd U;      // 记录上一时刻实际控制量
+    int target_ind_state = 0;  // 预测时域目标索引，改为成员变量以便新路径重置
 
     diffMpcController(int nx, int nu, int np, int nc) : NX(nx), NU(nu), NP(np), NC(nc) {
         U = Eigen::VectorXd::Zero(nu);
+    };
+
+    // 重置内部状态，应在收到新路径时调用
+    void reset() {
+        U = Eigen::VectorXd::Zero(NU);
+        target_ind_state = 0;
     };
     ~diffMpcController() {};
 

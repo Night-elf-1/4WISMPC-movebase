@@ -98,8 +98,8 @@ bool MpcLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& pla
     last_min_index_ = 0;
     has_plan_ = true;
 
-    // Reset MPC previous control
-    mpc_->U = Eigen::VectorXd::Zero(param_.NU);
+    // Reset MPC internal state for the new path
+    mpc_->reset();
 
     ROS_INFO("MpcLocalPlanner received plan with %zu points.", plan.size());
     return true;
@@ -134,10 +134,13 @@ bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     // 计算当前位置在参考轨迹上的最近点索引和误差
     auto [min_index, min_e] = calcForwardNearestIndex(initial_x(0), initial_x(1));
 
-    // Check goal reached
-    if (min_index >= static_cast<int>(r_x_.size()) - 2)
+    // Check goal reached by distance to the (preserved) final point
+    double dx_goal = initial_x(0) - r_x_.back();
+    double dy_goal = initial_x(1) - r_y_.back();
+    double dist_to_goal = std::sqrt(dx_goal * dx_goal + dy_goal * dy_goal);
+    if (dist_to_goal <= goal_xy_tolerance_ || min_index >= static_cast<int>(r_x_.size()) - 2)
     {
-        ROS_INFO_ONCE("MpcLocalPlanner: reached end of path, stopping.");
+        ROS_INFO_ONCE("MpcLocalPlanner: reached goal (dist=%.3f), stopping.", dist_to_goal);
         publishZeroCommands();
         cmd_vel.linear.x = 0.0;
         cmd_vel.linear.y = 0.0;
@@ -264,6 +267,31 @@ bool MpcLocalPlanner::getRobotPose(Eigen::Vector3d& state) const
     return true;
 }
 
+// 滑动平均平滑一个一维序列
+std::vector<double> MpcLocalPlanner::smoothVector(const std::vector<double>& data, int window) const
+{
+    std::vector<double> smoothed = data;
+    if (window <= 1 || data.empty()) return smoothed;
+
+    int half = window / 2;
+    for (size_t i = 0; i < data.size(); ++i)
+    {
+        double sum = 0.0;
+        int count = 0;
+        for (int j = -half; j <= half; ++j)
+        {
+            int idx = static_cast<int>(i) + j;
+            if (idx >= 0 && idx < static_cast<int>(data.size()))
+            {
+                sum += data[idx];
+                count++;
+            }
+        }
+        if (count > 0) smoothed[i] = sum / count;
+    }
+    return smoothed;
+}
+
 // 将接收到的全局路径转换为参考轨迹，包括位置、航向、曲率和速度
 void MpcLocalPlanner::convertPlanToReference(const std::vector<geometry_msgs::PoseStamped>& plan)
 {
@@ -273,11 +301,42 @@ void MpcLocalPlanner::convertPlanToReference(const std::vector<geometry_msgs::Po
     rcurvature_.clear();
     speed_profile_.clear();
 
+    const int path_smooth_window = 9;
+    const int speed_smooth_window = 5;
+    const int curvature_smooth_window = 5;
+
     for (const auto& pose : plan)
     {
         r_x_.push_back(pose.pose.position.x);
         r_y_.push_back(pose.pose.position.y);
-        ryaw_.push_back(getYaw(pose.pose.orientation));
+    }
+
+    // 先对路径坐标做滑动平均平滑，降低全局规划器稀疏路点造成的抖动
+    // 但保持首尾点不变，避免终点被拖离原始目标位置
+    {
+        std::vector<double> sx = smoothVector(r_x_, path_smooth_window);
+        std::vector<double> sy = smoothVector(r_y_, path_smooth_window);
+        if (!r_x_.empty()) {
+            sx.front() = r_x_.front();
+            sx.back()  = r_x_.back();
+        }
+        if (!r_y_.empty()) {
+            sy.front() = r_y_.front();
+            sy.back()  = r_y_.back();
+        }
+        r_x_ = std::move(sx);
+        r_y_ = std::move(sy);
+    }
+
+    // 从平滑后的坐标重新计算航向角（不依赖 pose.orientation，兼容性更好）
+    ryaw_.resize(plan.size(), 0.0);
+    for (size_t i = 0; i < plan.size(); ++i)
+    {
+        size_t ip1 = std::min(i + 1, plan.size() - 1);
+        size_t im1 = (i == 0) ? 0 : i - 1;
+        double dx = r_x_[ip1] - r_x_[im1];
+        double dy = r_y_[ip1] - r_y_[im1];
+        ryaw_[i] = std::atan2(dy, dx);
     }
 
     // 平滑航向角，避免曲率计算时出现不连续
@@ -309,13 +368,44 @@ void MpcLocalPlanner::convertPlanToReference(const std::vector<geometry_msgs::Po
         rcurvature_[i] = (ds > 1e-6) ? (dyaw / ds) : 0.0;
     }
 
+    // 平滑曲率，避免速度曲线剧烈抖动
+    rcurvature_ = smoothVector(rcurvature_, curvature_smooth_window);
+
     // 计算参考速度，考虑曲率和最大速度约束
     speed_profile_ = mpc_->calculateReferenceSpeeds(rcurvature_, target_speed_);
 
-    // Clamp speed to max_speed
+    // 把速度钳制在 [min_speed, max_speed] 范围内
+    const double min_speed = 0.15;
     for (auto& v : speed_profile_)
     {
-        v = std::max(0.05, std::min(max_speed_, v));
+        v = std::max(min_speed, std::min(max_speed_, v));
+    }
+
+    // 对速度曲线做滑动平均平滑，避免急弯处速度骤降导致 MPC 急刹停住
+    speed_profile_ = smoothVector(speed_profile_, speed_smooth_window);
+
+    // 终点前减速到 0，避免到了终点还在以 min_speed 硬冲
+    const double stop_distance = 0.4;
+    for (size_t i = 0; i < speed_profile_.size(); ++i)
+    {
+        double remaining = 0.0;
+        for (size_t j = i; j + 1 < speed_profile_.size(); ++j)
+        {
+            double dx = r_x_[j + 1] - r_x_[j];
+            double dy = r_y_[j + 1] - r_y_[j];
+            remaining += std::sqrt(dx * dx + dy * dy);
+        }
+        if (remaining < stop_distance)
+        {
+            double ratio = remaining / stop_distance;
+            speed_profile_[i] *= std::max(0.0, ratio);
+        }
+    }
+
+    // 最终钳制到 [0, max_speed]
+    for (auto& v : speed_profile_)
+    {
+        v = std::max(0.0, std::min(max_speed_, v));
     }
 }
 
