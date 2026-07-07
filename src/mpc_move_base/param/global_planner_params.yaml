@@ -1,0 +1,10 @@
+GlobalPlanner:
+  allow_unknown: true        # 允许穿过未知区域规划
+  default_tolerance: 0.0     # 目标点容差，0 表示必须到达精确目标
+  use_dijkstra: false        # false 表示使用 A* 算法；true 表示使用 Dijkstra
+  use_grid_path: false       # false 生成更平滑的对角线路径；true 生成栅格对齐路径
+  use_quadratic: true        # 使用二次逼近计算势场
+  visualize_potential: false # 是否在 RViz 中可视化势场
+  lethal_cost: 253           # 致命代价值
+  neutral_cost: 50           # 中性代价值
+  cost_factor: 3.0           # 代价值缩放因子

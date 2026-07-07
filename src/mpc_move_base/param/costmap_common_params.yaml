@@ -1,0 +1,19 @@
+# 机器人几何参数，如果机器人是圆形，设置 robot_radius；如果是其他形状设置 footprint
+# 本车为矩形，使用 footprint。base_link 位于车体几何中心，车长 1.3475m，车宽 0.34m
+robot_radius: 0.12 # 保留，但 footprint 优先
+footprint: [[0.68, 0.18], [0.68, -0.18], [-0.68, -0.18], [-0.68, 0.18]]
+
+obstacle_range: 10.0 # 用于障碍物探测，检测到距离小于 10 米的障碍物时引入代价地图
+raytrace_range: 12.0 # 用于清除障碍物，清除 12 米以外的障碍物
+
+# 膨胀半径，扩展在碰撞区域以外的代价区域，使得机器人规划路径避开障碍物
+inflation_radius: 0.4
+# 代价比例系数，越大则代价值越小
+cost_scaling_factor: 3.0
+
+# 地图类型
+map_type: costmap
+# 导航包所需要的传感器
+observation_sources: scan
+# 对传感器的坐标系和数据进行配置。激光雷达传感器用于在代价地图添加和清除障碍物
+scan: {sensor_frame: rslidar, data_type: LaserScan, topic: /sensor/common/tools/scan, marking: true, clearing: true}

@@ -1,0 +1,42 @@
+car_param:
+  # 分配的速度和转角
+  one_wheell_v : 0.0
+  one_wheell_angle : 0.0
+  two_wheell_v : 0.0
+  two_wheell_angle : 0.0
+  three_wheell_v : 0.0
+  three_wheell_angle : 0.0
+  four_wheell_v : 0.0
+  four_wheell_angle : 0.0
+
+  #车的尺寸
+  one_wheell_ateraldistance : 0.4
+  one_wheell_Longitudinaldistance : 0.4615
+  two_wheell_ateraldistance : 0.4
+  two_wheell_Longitudinaldistance : 0.4615 
+  three_wheell_ateraldistance : 0.4
+  three_wheell_Longitudinaldistance : 0.4725 
+  four_wheell_ateraldistance : 0.4
+  four_wheell_Longitudinaldistance : 0.4725
+  wheel_r : 0.15
+
+  #反馈速度和角速度
+  boby_w : 0
+  boby_v : 0
+
+  yaw : 0
+  position:
+    - 0.0
+    - 0.0
+    - 0.0
+  velocity :
+    - 0.0
+    - 0.0
+    - 0.0
+  orientation :
+    - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+
+  car_model : 1

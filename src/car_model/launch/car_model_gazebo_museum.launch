@@ -1,0 +1,48 @@
+<launch>
+  <!-- Arguments 上传参数-->
+  <!-- <arg name="map_file" default="$(find car_model)/maps/iscas_museum/ISCAS_Museum.yaml"/> -->
+  <arg name="open_rviz" default="true"/>
+  <arg name="move_forward_only" default="false"/>
+
+  <!-- 小车在 Gazebo 中的初始 spawn 位置 -->
+  <arg name="x" default="-2"/>
+  <arg name="y" default="1"/>
+  <arg name="z" default="0"/>
+
+  <!-- AMCL 初始位姿（默认与 spawn 位置一致） -->
+  <arg name="initial_pose_x" default="$(arg x)"/>
+  <arg name="initial_pose_y" default="$(arg y)"/>
+  <arg name="initial_pose_a" default="0"/>
+
+  <!-- 是否启用 AMCL（没有地图时可设为 false，由外部提供 map->odom） -->
+  <arg name="use_amcl" default="true"/>
+
+  <!-- 是否由 twist_sub_node 发布轮速/转向指令 -->
+  <arg name="publish_wheel_commands" default="true"/>
+
+  <!-- Turtlebot3 加载gazebo小车模型-->
+  <include file="$(find car_model)/launch/car_model_simulation_museum.launch">
+    <arg name="x" value="$(arg x)"/>
+    <arg name="y" value="$(arg y)"/>
+    <arg name="z" value="$(arg z)"/>
+    <arg name="publish_wheel_commands" value="$(arg publish_wheel_commands)"/>
+  </include>
+
+  <!-- Map server 加载地图-->
+  <!-- <node pkg="map_server" name="map_server" type="map_server" args="$(arg map_file)"/> -->
+
+  <!-- AMCL 定位-->
+  <group if="$(arg use_amcl)">
+    <include file="$(find car_model)/launch/amcl.launch">
+      <arg name="initial_pose_x" value="$(arg initial_pose_x)"/>
+      <arg name="initial_pose_y" value="$(arg initial_pose_y)"/>
+      <arg name="initial_pose_a" value="$(arg initial_pose_a)"/>
+    </include>
+  </group>
+
+  <!-- rviz -->
+  <group if="$(arg open_rviz)"> 
+    <node pkg="rviz" type="rviz" name="rviz" required="true"
+          args="-d $(find car_model)/rviz/car_model_navigation.rviz"/>
+  </group>
+</launch>

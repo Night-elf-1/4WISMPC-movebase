@@ -1,0 +1,87 @@
+#ifndef MPC_LOCAL_PLANNER_HPP
+#define MPC_LOCAL_PLANNER_HPP
+
+#include <ros/ros.h>
+#include <nav_core/base_local_planner.h>
+#include <costmap_2d/costmap_2d_ros.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/Twist.h>
+#include <nav_msgs/Odometry.h>
+#include <nav_msgs/Path.h>
+#include <std_msgs/Float64.h>
+#include <tf2_ros/buffer.h>
+
+#include <Eigen/Dense>
+#include <mutex>
+#include <vector>
+
+#include "mpc_local_planner/nmpc_core/diffmpc.hpp"
+
+namespace mpc_local_planner
+{
+
+class MpcLocalPlanner : public nav_core::BaseLocalPlanner
+{
+public:
+    MpcLocalPlanner();
+    ~MpcLocalPlanner();
+
+    void initialize(std::string name, tf2_ros::Buffer* tf, costmap_2d::Costmap2DROS* costmap_ros) override;
+    bool setPlan(const std::vector<geometry_msgs::PoseStamped>& plan) override;
+    bool computeVelocityCommands(geometry_msgs::Twist& cmd_vel) override;
+    bool isGoalReached() override;
+
+private:
+    void odomCallback(const nav_msgs::Odometry::ConstPtr& msg);
+    double getYaw(const geometry_msgs::Quaternion& q) const;
+    bool getRobotPose(Eigen::Vector3d& state) const;
+    void convertPlanToReference(const std::vector<geometry_msgs::PoseStamped>& plan);
+    std::tuple<int, double> calcForwardNearestIndex(double current_x, double current_y);
+    void publishWheelCommands(const Eigen::VectorXd& U);
+    void publishZeroCommands();
+    void computeEquivalentTwist(const Eigen::VectorXd& U, geometry_msgs::Twist& cmd_vel);
+
+    bool initialized_ = false;
+    std::string name_;
+    tf2_ros::Buffer* tf_ = nullptr;
+    costmap_2d::Costmap2DROS* costmap_ros_ = nullptr;
+
+    // MPC
+    parameters param_;
+    std::unique_ptr<diffMpcController> mpc_;
+    std::unique_ptr<KinematicModel_MPC> agv_model_;
+
+    // Reference trajectory
+    std::vector<double> r_x_, r_y_, ryaw_, rcurvature_, speed_profile_;
+    bool has_plan_ = false;
+    int last_min_index_ = 0;
+
+    // Odometry
+    ros::Subscriber odom_sub_;
+    nav_msgs::Odometry latest_odom_;
+    bool has_odom_ = false;
+    mutable std::mutex mutex_;
+
+    // Wheel command publishers
+    ros::Publisher pub_whell_front_L_;
+    ros::Publisher pub_steer_front_L_;
+    ros::Publisher pub_whell_front_R_;
+    ros::Publisher pub_steer_front_R_;
+    ros::Publisher pub_whell_rear_L_;
+    ros::Publisher pub_steer_rear_L_;
+    ros::Publisher pub_whell_rear_R_;
+    ros::Publisher pub_steer_rear_R_;
+
+    // Parameters
+    double wheel_radius_ = 0.15;
+    double max_speed_ = 1.5;
+    double target_speed_ = 0.5;
+    int forward_window_ = 80;
+    int back_buffer_ = 10;
+    double goal_xy_tolerance_ = 0.10;
+    double goal_yaw_tolerance_ = 0.05;
+};
+
+} // namespace mpc_local_planner
+
+#endif // MPC_LOCAL_PLANNER_HPP

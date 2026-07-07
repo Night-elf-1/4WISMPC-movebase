@@ -1,0 +1,48 @@
+<launch>
+    <!-- Arguments 上传参数-->
+    <!-- <arg name="map_file" default="$(find car_model)/maps/iscas_museum/ISCAS_Museum.yaml"/> -->
+    <arg name="robot_name" default="smart"/>
+    <arg name="open_rviz" default="true"/>
+    <arg name="move_forward_only" default="false"/>
+    <arg name="world_name" default="$(find car_model)/world/hamsterworld.world"/>
+
+    <!-- 小车在 Gazebo 中的初始 spawn 位置 -->
+    <arg name="x" default="0"/>
+    <arg name="y" default="0"/>
+    <arg name="z" default="0"/>
+
+    <include file="$(find gazebo_ros)/launch/empty_world.launch">
+        <arg name="world_name" value="$(arg world_name)"/>
+        <!-- <arg name="paused" value="$(arg paused)"/> -->
+        <arg name="use_sim_time" value="true"/>
+        <arg name="gui" value="true"/>
+        <arg name="headless" value="false"/>
+        <arg name="debug" value="false"/>
+    </include>
+
+    <param name="robot_description" command="$(find xacro)/xacro '$(find car_model)/urdf/smart.xacro' roboname:='smart'" />
+    <node name="spawn_model" pkg="gazebo_ros" type="spawn_model"
+            args="-urdf -param robot_description -model sevnce_robot -x $(arg x) -y $(arg y) -z $(arg z)"
+            output="screen">
+    </node>
+
+    <!-- 订阅 Gazebo model_states，发布 ground truth 里程计 (odom -> base_link) -->
+    <node pkg="car_model" type="gazebo_odom_publisher.py" name="gazebo_odom_publisher" output="screen"/>
+
+    <!-- 默认关闭 twist_sub_node 的轮速/转角发布，避免与 MPC 局部规划器冲突 -->
+    <arg name="publish_wheel_commands" default="false"/>
+    <!-- 默认关闭 twist_sub_node 的自定义里程计，改用 gazebo_odom_publisher 的 ground truth 里程计 -->
+    <arg name="publish_odom_tf" default="false"/>
+    <include file="$(find car_model)/launch/simplelaunch/control.launch">
+    	<arg name="robot_name" value="smart"/>
+    	<arg name="config_file" value="smart_control_config.yaml"/>
+        <arg name="publish_wheel_commands" value="$(arg publish_wheel_commands)"/>
+        <arg name="publish_odom_tf" value="$(arg publish_odom_tf)"/>
+  	</include> 
+
+    <!-- rviz -->
+    <group if="$(arg open_rviz)"> 
+        <node pkg="rviz" type="rviz" name="rviz" required="true"
+            args="-d $(find car_model)/rviz/simplerviz/car_model_navigation.rviz"/>
+    </group>
+</launch>

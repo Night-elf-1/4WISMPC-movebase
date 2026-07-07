@@ -1,0 +1,15 @@
+MpcLocalPlanner:
+  # 车辆几何参数（与 URDF/smart.xacro 对应）
+  wheel_radius: 0.15     # 轮子半径 [m]
+  L: 0.4615              # 车辆中心到前后轴距离 [m]
+  W: 0.4                 # 车辆中心到左右轮距离 [m]
+
+  # 参考速度/轨迹参数
+  max_speed: 0.5         # 最大允许速度 [m/s]
+  target_speed: 0.5      # 目标巡航速度 [m/s]
+  forward_window: 80     # 前向搜索最近点窗口大小
+  back_buffer: 10        # 后向搜索缓冲大小
+
+  # 目标到达判据
+  goal_xy_tolerance: 0.10
+  goal_yaw_tolerance: 0.05

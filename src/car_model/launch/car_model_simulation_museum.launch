@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- <arg name="paused" default="false"/> -->
+    <!-- <arg name="world_name" default="$(find car_model)/world/ROS-Academy.world"/> -->
+    <arg name="x" default="-2"/>
+    <arg name="y" default="1"/>
+    <arg name="z" default="0"/>
+
+    <!-- 是否由 twist_sub_node 发布轮速/转向指令 -->
+    <arg name="publish_wheel_commands" default="true"/>
+
+    <include file="$(find gazebo_ros)/launch/empty_world.launch">
+        <!-- <arg name="world_name" value="$(arg world_name)"/> -->
+        <!-- <arg name="paused" value="$(arg paused)"/> -->
+        <arg name="use_sim_time" value="true"/>
+        <arg name="gui" value="true"/>
+        <arg name="headless" value="false"/>
+        <arg name="debug" value="false"/>
+    </include>
+
+    <param name="robot_description" command="$(find xacro)/xacro '$(find car_model)/urdf/smart.xacro' roboname:='smart'" />
+    <node name="spawn_model" pkg="gazebo_ros" type="spawn_model"
+          args="-urdf -param robot_description -model sevnce_robot -x $(arg x) -y $(arg y)  -z $(arg z)"
+          output="screen">
+    </node>
+
+    <include file="$(find car_model)/launch/control.launch">
+    	<arg name="robot_name" value="smart"/>
+    	<arg name="config_file" value="smart_control_config.yaml"/>
+        <arg name="publish_wheel_commands" value="$(arg publish_wheel_commands)"/>
+  	</include> 
+    
+</launch>

@@ -1,0 +1,34 @@
+<launch>
+  <!-- 小车 spawn 到参考路径起点附近 -->
+  <arg name="x" default="10"/>
+  <arg name="y" default="0"/>
+  <arg name="z" default="0"/>
+  <arg name="initial_pose_a" default="0"/>
+
+  <!-- 启动 Gazebo 小车仿真，但不启动 AMCL，且不让 twist_sub_node 发轮子控制指令 -->
+  <include file="$(find car_model)/launch/car_model_gazebo_museum.launch">
+    <arg name="x" value="$(arg x)"/>
+    <arg name="y" value="$(arg y)"/>
+    <arg name="z" value="$(arg z)"/>
+    <arg name="initial_pose_x" value="$(arg x)"/>
+    <arg name="initial_pose_y" value="$(arg y)"/>
+    <arg name="initial_pose_a" value="$(arg initial_pose_a)"/>
+    <arg name="open_rviz" value="false"/>
+    <arg name="use_amcl" value="false"/>
+    <arg name="publish_wheel_commands" value="false"/>
+  </include>
+
+  <!-- 没有地图时，AMCL 无法发布 map->odom，这里用静态 TF 补齐 -->
+  <!-- 含义：odom 坐标系原点在 map 坐标系中的位置为 (x, y, 0) -->
+  <node pkg="tf2_ros" type="static_transform_publisher" name="map_to_odom_static"
+        args="$(arg x) $(arg y) 0 0 0 0 map odom"/>
+
+  <!-- 发布参考路径 -->
+  <node pkg="reference_path_publisher" type="ref_path_publisher" name="ref_path_publisher" output="screen">
+    <param name="target_speed" value="3.0"/>
+  </node>
+
+  <!-- 启动 rviz：同时显示仿真小车与参考路径 -->
+  <node pkg="rviz" type="rviz" name="rviz" required="true"
+        args="-d $(find reference_path_publisher)/rviz/car_model_with_ref_path.rviz"/>
+</launch>

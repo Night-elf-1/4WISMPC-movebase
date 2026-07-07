@@ -1,0 +1,7 @@
+<launch>
+  <!-- 发布参考路径 -->
+  <node pkg="reference_path_publisher" type="ref_path_publisher" name="ref_path_publisher" output="screen"/>
+
+  <!-- 启动 rviz，加载配置 -->
+  <node pkg="rviz" type="rviz" name="rviz" args="-d $(find reference_path_publisher)/rviz/ref_path.rviz"/>
+</launch>

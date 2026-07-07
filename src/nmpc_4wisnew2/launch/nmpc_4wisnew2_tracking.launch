@@ -1,0 +1,21 @@
+<launch>
+  <!-- 启动车辆模型、参考路径发布器、rviz（与线性/非线性 MPC 共用同一套仿真环境） -->
+  <include file="$(find reference_path_publisher)/launch/car_model_with_ref_path.launch">
+    <arg name="x" value="10"/>
+    <arg name="y" value="0"/>
+    <arg name="z" value="0"/>
+  </include>
+
+  <!-- 8 维 NMPC 控制器节点（直接优化四轮轮速/转角） -->
+  <node pkg="nmpc_4wisnew2" type="nmpc_4wisnew2_controller_node"
+        name="nmpc_4wisnew2_controller" output="screen">
+    <param name="wheel_radius" value="0.15"/>
+    <!-- NMPC 单步求解较慢，控制频率适当降低 -->
+    <param name="control_rate" value="10.0"/>
+    <param name="use_tf_for_state" value="true"/>
+    <param name="spawn_x" value="10.0"/>
+    <param name="spawn_y" value="0.0"/>
+    <param name="forward_window" value="80"/>
+    <param name="back_buffer" value="2"/>
+  </node>
+</launch>
