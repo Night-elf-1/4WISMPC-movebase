@@ -12,4 +12,4 @@ MpcLocalPlanner:
 
   # 目标到达判据
   goal_xy_tolerance: 0.10
-  goal_yaw_tolerance: 0.05
+  goal_yaw_tolerance: 0.2

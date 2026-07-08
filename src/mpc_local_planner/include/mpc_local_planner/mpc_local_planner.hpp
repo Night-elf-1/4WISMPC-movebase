@@ -39,8 +39,10 @@ private:
     std::vector<double> smoothVector(const std::vector<double>& data, int window) const;
     std::tuple<int, double> calcForwardNearestIndex(double current_x, double current_y);
     void publishWheelCommands(const Eigen::VectorXd& U);
-    void publishZeroCommands();
+    void publishZeroCommands() const;
     void computeEquivalentTwist(const Eigen::VectorXd& U, geometry_msgs::Twist& cmd_vel);
+    bool checkGoalReached(const Eigen::Vector3d& current_state,
+                          double& dist_to_goal, double& dyaw) const;
 
     bool initialized_ = false;
     std::string name_;
@@ -79,8 +81,8 @@ private:
     double target_speed_ = 0.5;
     int forward_window_ = 80;
     int back_buffer_ = 10;
-    double goal_xy_tolerance_ = 0.10;
-    double goal_yaw_tolerance_ = 0.05;
+    double goal_xy_tolerance_ = 0.2;
+    double goal_yaw_tolerance_ = 0.2;
 };
 
 } // namespace mpc_local_planner

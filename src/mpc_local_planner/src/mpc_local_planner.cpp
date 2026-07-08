@@ -134,17 +134,17 @@ bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     // 计算当前位置在参考轨迹上的最近点索引和误差
     auto [min_index, min_e] = calcForwardNearestIndex(initial_x(0), initial_x(1));
 
-    // Check goal reached by distance to the (preserved) final point
-    double dx_goal = initial_x(0) - r_x_.back();
-    double dy_goal = initial_x(1) - r_y_.back();
-    double dist_to_goal = std::sqrt(dx_goal * dx_goal + dy_goal * dy_goal);
-    if (dist_to_goal <= goal_xy_tolerance_ || min_index >= static_cast<int>(r_x_.size()) - 2)
+    // Check goal reached by distance to the (preserved) final point.
+    // We stop wheel commands here immediately, even if isGoalReached() hasn't
+    // been checked by move_base in this control cycle yet.
+    double dist_to_goal = 0.0, dyaw_to_goal = 0.0;
+    bool goal_reached = checkGoalReached(initial_x, dist_to_goal, dyaw_to_goal);
+    if (goal_reached)
     {
-        ROS_INFO_ONCE("MpcLocalPlanner: reached goal (dist=%.3f), stopping.", dist_to_goal);
+        ROS_INFO_ONCE("MpcLocalPlanner: reached goal (dist=%.3f, dyaw=%.3f), stopping.",
+                      dist_to_goal, dyaw_to_goal);
         publishZeroCommands();
-        cmd_vel.linear.x = 0.0;
-        cmd_vel.linear.y = 0.0;
-        cmd_vel.angular.z = 0.0;
+        cmd_vel = geometry_msgs::Twist();
         return true;
     }
 
@@ -195,23 +195,47 @@ bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     // 返回给 move_base 的 cmd_vel
     computeEquivalentTwist(U_solve, cmd_vel);
 
-    ROS_INFO_THROTTLE(1.0,
-                      "MpcLocalPlanner: nearest_idx=%d, nearest_dist=%.3f, v=[%.2f, %.2f, %.2f, %.2f], steer=[%.3f, %.3f, %.3f, %.3f]",
-                      min_index, min_e,
-                      U_solve(0), U_solve(1), U_solve(2), U_solve(3),
-                      U_solve(4), U_solve(5), U_solve(6), U_solve(7));
+    // ROS_INFO_THROTTLE(1.0,
+    //                   "MpcLocalPlanner: nearest_idx=%d, nearest_dist=%.3f, v=[%.2f, %.2f, %.2f, %.2f], steer=[%.3f, %.3f, %.3f, %.3f]",
+    //                   min_index, min_e,
+    //                   U_solve(0), U_solve(1), U_solve(2), U_solve(3),
+    //                   U_solve(4), U_solve(5), U_solve(6), U_solve(7));
 
     return true;
+}
+
+bool MpcLocalPlanner::checkGoalReached(const Eigen::Vector3d& current_state,
+                                       double& dist_to_goal, double& dyaw) const
+{
+    if (!initialized_ || !has_plan_ || r_x_.empty())
+    {
+        dist_to_goal = std::numeric_limits<double>::max();
+        dyaw = std::numeric_limits<double>::max();
+        return false;
+    }
+
+    double dx = current_state(0) - r_x_.back();
+    double dy = current_state(1) - r_y_.back();
+    dist_to_goal = std::sqrt(dx * dx + dy * dy);
+    dyaw = angles::shortest_angular_distance(current_state(2), ryaw_.back());
+    cout << "检查结果：" << (dist_to_goal <= goal_xy_tolerance_ && std::fabs(dyaw) <= goal_yaw_tolerance_) << endl;
+
+    if (dist_to_goal <= goal_xy_tolerance_ && std::fabs(dyaw) <= goal_yaw_tolerance_)
+    {
+        ROS_INFO_ONCE("MpcLocalPlanner: reached goal");
+        publishZeroCommands();
+        // cmd_vel = geometry_msgs::Twist();
+        return true;
+    }else
+    {
+        return false;
+    }
+    // return dist_to_goal <= goal_xy_tolerance_ && std::fabs(dyaw) <= goal_yaw_tolerance_;
 }
 
 bool MpcLocalPlanner::isGoalReached()
 {
     std::lock_guard<std::mutex> lock(mutex_);
-
-    if (!initialized_ || !has_plan_ || r_x_.empty())
-    {
-        return false;
-    }
 
     Eigen::Vector3d current_state;
     if (!getRobotPose(current_state))
@@ -219,14 +243,8 @@ bool MpcLocalPlanner::isGoalReached()
         return false;
     }
 
-    double dx = current_state(0) - r_x_.back();
-    double dy = current_state(1) - r_y_.back();
-    double dyaw = angles::shortest_angular_distance(current_state(2), ryaw_.back());
-
-    bool xy_reached = std::sqrt(dx * dx + dy * dy) <= goal_xy_tolerance_;
-    bool yaw_reached = std::fabs(dyaw) <= goal_yaw_tolerance_;
-
-    return xy_reached && yaw_reached;
+    double dist_to_goal = 0.0, dyaw = 0.0;
+    return checkGoalReached(current_state, dist_to_goal, dyaw);
 }
 
 void MpcLocalPlanner::odomCallback(const nav_msgs::Odometry::ConstPtr& msg)
@@ -386,18 +404,18 @@ void MpcLocalPlanner::convertPlanToReference(const std::vector<geometry_msgs::Po
 
     // 终点前减速到 0，避免到了终点还在以 min_speed 硬冲
     const double stop_distance = 0.4;
+    std::vector<double> remaining(speed_profile_.size(), 0.0);
+    for (int i = static_cast<int>(speed_profile_.size()) - 2; i >= 0; --i)
+    {
+        double dx = r_x_[i + 1] - r_x_[i];
+        double dy = r_y_[i + 1] - r_y_[i];
+        remaining[i] = remaining[i + 1] + std::sqrt(dx * dx + dy * dy);
+    }
     for (size_t i = 0; i < speed_profile_.size(); ++i)
     {
-        double remaining = 0.0;
-        for (size_t j = i; j + 1 < speed_profile_.size(); ++j)
+        if (remaining[i] < stop_distance)
         {
-            double dx = r_x_[j + 1] - r_x_[j];
-            double dy = r_y_[j + 1] - r_y_[j];
-            remaining += std::sqrt(dx * dx + dy * dy);
-        }
-        if (remaining < stop_distance)
-        {
-            double ratio = remaining / stop_distance;
+            double ratio = remaining[i] / stop_distance;
             speed_profile_[i] *= std::max(0.0, ratio);
         }
     }
@@ -472,7 +490,7 @@ void MpcLocalPlanner::publishWheelCommands(const Eigen::VectorXd& U)
     pub_steer_front_R_.publish(msg);
 }
 
-void MpcLocalPlanner::publishZeroCommands()
+void MpcLocalPlanner::publishZeroCommands() const
 {
     std_msgs::Float64 msg;
     msg.data = 0.0;

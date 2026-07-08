@@ -659,7 +659,7 @@ Eigen::VectorXd diffMpcController::mpc_solve(std::vector<double>& cx, std::vecto
     U_out(7) = solution.x[d4_start_];
 
     U = U_out; 
-    std::cout << "U_out: " << U_out.transpose() << std::endl;
+    // std::cout << "U_out: " << U_out.transpose() << std::endl;
     return U_out;
 }
 
