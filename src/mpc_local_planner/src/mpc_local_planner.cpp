@@ -47,10 +47,15 @@ void MpcLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap_
     private_nh.param("back_buffer", back_buffer_, 10);
     private_nh.param("goal_xy_tolerance", goal_xy_tolerance_, 0.10);
     private_nh.param("goal_yaw_tolerance", goal_yaw_tolerance_, 0.05);
+    private_nh.param("align_yaw_threshold", align_yaw_threshold_, M_PI / 3.0);
+    private_nh.param("align_max_omega", align_max_omega_, 0.5);
+    private_nh.param("align_kp", align_kp_, 1.0);
 
     // MPC parameters from diffmpc.hpp defaults, allow override
     private_nh.param("L", param_.L, 0.4615);
     private_nh.param("W", param_.W, 0.4);
+    private_nh.param("L_front", L_front_, 0.4615);
+    private_nh.param("L_rear", L_rear_, 0.4725);
     param_.NX = NMPC_NX;
     param_.NU = NMPC_NU;
     param_.NP = NMPC_T;
@@ -98,6 +103,27 @@ bool MpcLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& pla
     last_min_index_ = 0;
     has_plan_ = true;
 
+    // Decide whether to align heading first
+    Eigen::Vector3d current_state;
+    if (getRobotPose(current_state) && !ryaw_.empty())
+    {
+        double heading_error = angles::shortest_angular_distance(current_state(2), ryaw_[0]);
+        if (std::fabs(heading_error) > align_yaw_threshold_)
+        {
+            state_ = State::ALIGNING;
+            ROS_INFO("MpcLocalPlanner: initial heading error %.2f deg > %.2f deg, align first.",
+                     heading_error * 180.0 / M_PI, align_yaw_threshold_ * 180.0 / M_PI);
+        }
+        else
+        {
+            state_ = State::TRACKING;
+        }
+    }
+    else
+    {
+        state_ = State::TRACKING;
+    }
+
     // Reset MPC internal state for the new path
     mpc_->reset();
 
@@ -131,22 +157,83 @@ bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         return false;
     }
 
+    // Initial heading alignment: rotate in place before tracking
+    if (state_ == State::ALIGNING)
+    {
+        if (ryaw_.empty())
+        {
+            publishZeroCommands();
+            return false;
+        }
+        double heading_error = angles::shortest_angular_distance(initial_x(2), ryaw_[0]);
+        if (std::fabs(heading_error) <= align_yaw_threshold_)
+        {
+            state_ = State::TRACKING;
+            ROS_INFO("MpcLocalPlanner: alignment done, switching to tracking.");
+        }
+        else
+        {
+            double omega = align_kp_ * heading_error;
+            omega = std::max(-align_max_omega_, std::min(align_max_omega_, omega));
+
+            // In-place rotation using the same formula as four_wheeldrive.cpp
+            // R = v/w, for pure rotation v = 0 => R = 0
+            const double R = 0.0;
+            const double W = param_.W;
+            Eigen::VectorXd U(param_.NU);
+
+            // Wheel 1: front left
+            double angle_fl = std::atan(L_front_ / (R - W));
+            U(0) = omega * (L_front_ / std::sin(angle_fl));
+            U(4) = angle_fl;
+
+            // Wheel 2: front right
+            double angle_fr = std::atan(L_front_ / (R + W));
+            U(3) = omega * (L_front_ / std::sin(angle_fr));
+            U(7) = angle_fr;
+
+            // Wheel 3: rear left
+            double angle_rl = -std::atan(L_rear_ / (R - W));
+            U(1) = -omega * (L_rear_ / std::sin(angle_rl));
+            U(5) = angle_rl;
+
+            // Wheel 4: rear right
+            double angle_rr = -std::atan(L_rear_ / (R + W));
+            U(2) = -omega * (L_rear_ / std::sin(angle_rr));
+            U(6) = angle_rr;
+
+            publishWheelCommands(U);
+
+            cmd_vel.linear.x = 0.0;
+            cmd_vel.linear.y = 0.0;
+            cmd_vel.linear.z = 0.0;
+            cmd_vel.angular.x = 0.0;
+            cmd_vel.angular.y = 0.0;
+            cmd_vel.angular.z = omega;
+
+            ROS_INFO_THROTTLE(1.0,
+                              "MpcLocalPlanner: aligning, err=%.2f deg, omega=%.3f",
+                              heading_error * 180.0 / M_PI, omega);
+            return true;
+        }
+    }
+
     // 计算当前位置在参考轨迹上的最近点索引和误差
     auto [min_index, min_e] = calcForwardNearestIndex(initial_x(0), initial_x(1));
 
     // Check goal reached by distance to the (preserved) final point.
     // We stop wheel commands here immediately, even if isGoalReached() hasn't
     // been checked by move_base in this control cycle yet.
-    double dist_to_goal = 0.0, dyaw_to_goal = 0.0;
-    bool goal_reached = checkGoalReached(initial_x, dist_to_goal, dyaw_to_goal);
-    if (goal_reached)
-    {
-        ROS_INFO_ONCE("MpcLocalPlanner: reached goal (dist=%.3f, dyaw=%.3f), stopping.",
-                      dist_to_goal, dyaw_to_goal);
-        publishZeroCommands();
-        cmd_vel = geometry_msgs::Twist();
-        return true;
-    }
+    // double dist_to_goal = 0.0, dyaw_to_goal = 0.0;
+    // bool goal_reached = checkGoalReached(initial_x, dist_to_goal, dyaw_to_goal);
+    // if (goal_reached)
+    // {
+    //     ROS_INFO_ONCE("MpcLocalPlanner: reached goal (dist=%.3f, dyaw=%.3f), stopping.",
+    //                   dist_to_goal, dyaw_to_goal);
+    //     publishZeroCommands();
+    //     cmd_vel = geometry_msgs::Twist();
+    //     return true;
+    // }
 
     // If lateral error too large, reset control to reference
     if (min_e > 1.0)
@@ -218,7 +305,7 @@ bool MpcLocalPlanner::checkGoalReached(const Eigen::Vector3d& current_state,
     double dy = current_state(1) - r_y_.back();
     dist_to_goal = std::sqrt(dx * dx + dy * dy);
     dyaw = angles::shortest_angular_distance(current_state(2), ryaw_.back());
-    cout << "检查结果：" << (dist_to_goal <= goal_xy_tolerance_ && std::fabs(dyaw) <= goal_yaw_tolerance_) << endl;
+    // cout << "检查结果：" << (dist_to_goal <= goal_xy_tolerance_ && std::fabs(dyaw) <= goal_yaw_tolerance_) << endl;
 
     if (dist_to_goal <= goal_xy_tolerance_ && std::fabs(dyaw) <= goal_yaw_tolerance_)
     {
@@ -488,6 +575,10 @@ void MpcLocalPlanner::publishWheelCommands(const Eigen::VectorXd& U)
 
     msg.data = U(7);
     pub_steer_front_R_.publish(msg);
+    ROS_INFO_THROTTLE(1.0,
+                      "MpcLocalPlanner: wheel_cmds=[%.2f, %.2f, %.2f, %.2f], steer_cmds=[%.3f, %.3f, %.3f, %.3f]",
+                      U(0), U(1), U(2), U(3),
+                      U(4), U(5), U(6), U(7));
 }
 
 void MpcLocalPlanner::publishZeroCommands() const

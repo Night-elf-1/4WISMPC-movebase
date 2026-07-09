@@ -5,7 +5,8 @@
             "includePath": [
                 "${workspaceFolder}/**",
                 "/opt/ros/noetic/include/**",
-                "${workspaceFolder}/src/mpc_local_planner/include"
+                "${workspaceFolder}/src/mpc_local_planner/include",
+                "/usr/include/eigen3"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/gcc",

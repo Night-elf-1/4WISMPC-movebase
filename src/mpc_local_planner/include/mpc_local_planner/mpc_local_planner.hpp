@@ -23,6 +23,7 @@ namespace mpc_local_planner
 class MpcLocalPlanner : public nav_core::BaseLocalPlanner
 {
 public:
+    enum class State { ALIGNING, TRACKING };
     MpcLocalPlanner();
     ~MpcLocalPlanner();
 
@@ -46,6 +47,14 @@ private:
 
     bool initialized_ = false;
     std::string name_;
+
+    // Alignment state
+    State state_ = State::TRACKING;
+    double align_yaw_threshold_ = M_PI / 3.0;  // 60 deg
+    double align_max_omega_ = 0.5;             // rad/s
+    double align_kp_ = 1.0;
+    double L_front_ = 0.4615;
+    double L_rear_ = 0.4725;
     tf2_ros::Buffer* tf_ = nullptr;
     costmap_2d::Costmap2DROS* costmap_ros_ = nullptr;
 
@@ -78,10 +87,10 @@ private:
     // Parameters
     double wheel_radius_ = 0.15;
     double max_speed_ = 1.5;
-    double target_speed_ = 0.5;
+    double target_speed_ = 1.0;
     int forward_window_ = 80;
     int back_buffer_ = 10;
-    double goal_xy_tolerance_ = 0.2;
+    double goal_xy_tolerance_ = 0.1;
     double goal_yaw_tolerance_ = 0.2;
 };
 

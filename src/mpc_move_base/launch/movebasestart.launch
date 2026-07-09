@@ -11,5 +11,6 @@
     <include file="$(find mpc_move_base)/launch/movebase.launch" />
     <!-- 运行rviz -->
     <!-- <node pkg="rviz" type="rviz" name="rviz" args="-d $(find mpc_move_base)/rviz/nav.rviz" /> -->
+    <node pkg="rviz" type="rviz" name="rviz" required="true" args="-d $(find car_model)/rviz/simplerviz/car_model_navigation.rviz"/>
 
 </launch>
