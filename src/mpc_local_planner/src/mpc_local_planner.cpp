@@ -48,6 +48,9 @@ void MpcLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap_
     private_nh.param("goal_xy_tolerance", goal_xy_tolerance_, 0.10);
     private_nh.param("goal_yaw_tolerance", goal_yaw_tolerance_, 0.05);
     private_nh.param("align_yaw_threshold", align_yaw_threshold_, M_PI / 3.0);
+    private_nh.param("align_yaw_exit_threshold", align_yaw_exit_threshold_, M_PI / 18.0);
+    private_nh.param("align_recenter_max_step", align_recenter_max_step_, 0.05);
+    private_nh.param("align_recenter_tolerance", align_recenter_tolerance_, 0.01);
     private_nh.param("align_max_omega", align_max_omega_, 0.5);
     private_nh.param("align_kp", align_kp_, 1.0);
 
@@ -62,10 +65,10 @@ void MpcLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap_
     param_.NC = NMPC_T - 1;
     param_.dt = NMPC_DT;
 
-    // Subscribe to odometry for velocity/backup state
+    // 订阅 /odom，作为位姿获取失败时的备用数据
     odom_sub_ = nh.subscribe("/odom", 1, &MpcLocalPlanner::odomCallback, this);
 
-    // Advertise 8 wheel command publishers
+    // 发布 8 个底盘控制话题
     pub_whell_front_L_ = nh.advertise<std_msgs::Float64>("/smart/front_left_svelocity_controller/command", 1);
     pub_steer_front_L_ = nh.advertise<std_msgs::Float64>("/smart/front_left_str_controller/command", 1);
     pub_whell_front_R_ = nh.advertise<std_msgs::Float64>("/smart/front_right_velocity_controller/command", 1);
@@ -91,7 +94,7 @@ bool MpcLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& pla
         ROS_ERROR("MpcLocalPlanner has not been initialized, please call initialize() before using this planner.");
         return false;
     }
-
+    // 检查路径是否为空
     if (plan.empty())
     {
         ROS_WARN("Received empty plan.");
@@ -99,11 +102,12 @@ bool MpcLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& pla
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
-    convertPlanToReference(plan);
-    last_min_index_ = 0;
-    has_plan_ = true;
+    convertPlanToReference(plan);   // 调用 convertPlanToReference(plan)，把 ROS 路径转成 MPC 参考轨迹
+    last_min_index_ = 0;    // 重置最近点索引
+    has_plan_ = true;   
 
-    // Decide whether to align heading first
+    // 根据当前车头朝向和路径起点航向决定是否先原地对准
+    // 当前车头方向和路径起始方向差距超过 align_yaw_threshold_，状态会进入 ALIGNING，否则直接进入 TRACKING
     Eigen::Vector3d current_state;
     if (getRobotPose(current_state) && !ryaw_.empty())
     {
@@ -124,7 +128,7 @@ bool MpcLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& pla
         state_ = State::TRACKING;
     }
 
-    // Reset MPC internal state for the new path
+    // 调用 mpc_->reset()，重置 MPC 内部上一拍控制量
     mpc_->reset();
 
     ROS_INFO("MpcLocalPlanner received plan with %zu points.", plan.size());
@@ -134,18 +138,23 @@ bool MpcLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& pla
 bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-
+    // 检查初始化状态
     if (!initialized_)
     {
         ROS_ERROR("MpcLocalPlanner has not been initialized.");
         return false;
     }
-
+    // 检查是否已经收到路径
     if (!has_plan_)
     {
         ROS_WARN_THROTTLE(5.0, "MpcLocalPlanner has no plan yet.");
         publishZeroCommands();
         return false;
+    }
+
+    if (state_ == State::RECENTERING)
+    {
+        return recenterSteering(cmd_vel);
     }
 
     // 获取小车当前位置和航向
@@ -156,8 +165,7 @@ bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         publishZeroCommands();
         return false;
     }
-
-    // Initial heading alignment: rotate in place before tracking
+    // 如果处于 ALIGNING，先原地旋转；完成后先 RECENTERING 回正转角，再进入 TRACKING
     if (state_ == State::ALIGNING)
     {
         if (ryaw_.empty())
@@ -166,10 +174,12 @@ bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
             return false;
         }
         double heading_error = angles::shortest_angular_distance(initial_x(2), ryaw_[0]);
-        if (std::fabs(heading_error) <= align_yaw_threshold_)
+        if (std::fabs(heading_error) <= align_yaw_exit_threshold_)
         {
-            state_ = State::TRACKING;
-            ROS_INFO("MpcLocalPlanner: alignment done, switching to tracking.");
+            state_ = State::RECENTERING;
+            ROS_INFO("MpcLocalPlanner: alignment done, heading error %.2f deg <= %.2f deg, recenter steering.",
+                     heading_error * 180.0 / M_PI, align_yaw_exit_threshold_ * 180.0 / M_PI);
+            return recenterSteering(cmd_vel);
         }
         else
         {
@@ -202,6 +212,7 @@ bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
             U(2) = -omega * (L_rear_ / std::sin(angle_rr));
             U(6) = angle_rr;
 
+            align_recenter_steer_ << U(4), U(5), U(6), U(7);
             publishWheelCommands(U);
 
             cmd_vel.linear.x = 0.0;
@@ -218,24 +229,11 @@ bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         }
     }
 
-    // 计算当前位置在参考轨迹上的最近点索引和误差
+    // 找当前机器人在参考路径上的最近点
     auto [min_index, min_e] = calcForwardNearestIndex(initial_x(0), initial_x(1));
 
-    // Check goal reached by distance to the (preserved) final point.
-    // We stop wheel commands here immediately, even if isGoalReached() hasn't
-    // been checked by move_base in this control cycle yet.
-    // double dist_to_goal = 0.0, dyaw_to_goal = 0.0;
-    // bool goal_reached = checkGoalReached(initial_x, dist_to_goal, dyaw_to_goal);
-    // if (goal_reached)
-    // {
-    //     ROS_INFO_ONCE("MpcLocalPlanner: reached goal (dist=%.3f, dyaw=%.3f), stopping.",
-    //                   dist_to_goal, dyaw_to_goal);
-    //     publishZeroCommands();
-    //     cmd_vel = geometry_msgs::Twist();
-    //     return true;
-    // }
-
-    // If lateral error too large, reset control to reference
+    // 如果横向误差 min_e > 1.0，代码会用当前参考点的速度和曲率构造一个近似的参考轮速/转角，写入 mpc_->U
+    // 给 MPC 一个更合理的初值，避免偏离路径太远时优化器从奇怪的上一拍控制量开始算
     if (min_e > 1.0)
     {
         double v_r = speed_profile_[min_index];
@@ -256,7 +254,7 @@ bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         ROS_WARN_THROTTLE(1.0, "MpcLocalPlanner: lateral error %.3f, resetting control to reference.", min_e);
     }
 
-    // Update kinematic model state
+    // 更新运动学模型状态
     agv_model_->x   = initial_x(0);
     agv_model_->y   = initial_x(1);
     agv_model_->yaw = initial_x(2);
@@ -516,6 +514,7 @@ void MpcLocalPlanner::convertPlanToReference(const std::vector<geometry_msgs::Po
 
 std::tuple<int, double> MpcLocalPlanner::calcForwardNearestIndex(double current_x, double current_y)
 {
+    // 在上一次最近点附近找最近点
     int n = r_x_.size();
     int start_idx = std::max(0, last_min_index_ - back_buffer_);
     int end_idx = std::min(n, last_min_index_ + forward_window_);
@@ -593,6 +592,59 @@ void MpcLocalPlanner::publishZeroCommands() const
     pub_steer_rear_L_.publish(msg);
     pub_whell_rear_R_.publish(msg);
     pub_steer_rear_R_.publish(msg);
+}
+
+bool MpcLocalPlanner::recenterSteering(geometry_msgs::Twist& cmd_vel)
+{
+    const double step = std::max(1e-4, align_recenter_max_step_);
+    const double tolerance = std::max(0.0, align_recenter_tolerance_);
+
+    Eigen::VectorXd U = Eigen::VectorXd::Zero(param_.NU);
+    bool done = true;
+
+    for (int i = 0; i < 4; ++i)
+    {
+        double angle = align_recenter_steer_(i);
+        if (angle > step)
+        {
+            angle -= step;
+        }
+        else if (angle < -step)
+        {
+            angle += step;
+        }
+        else
+        {
+            angle = 0.0;
+        }
+
+        align_recenter_steer_(i) = angle;
+        U(i + 4) = angle;
+
+        if (std::fabs(angle) > tolerance)
+        {
+            done = false;
+        }
+    }
+
+    publishWheelCommands(U);
+    cmd_vel = geometry_msgs::Twist();
+
+    if (done)
+    {
+        align_recenter_steer_.setZero();
+        mpc_->U = Eigen::VectorXd::Zero(param_.NU);
+        state_ = State::TRACKING;
+        ROS_INFO("MpcLocalPlanner: steering recentered, switching to tracking.");
+    }
+    else
+    {
+        ROS_INFO_THROTTLE(1.0,
+                          "MpcLocalPlanner: recentering steering, steer_cmds=[%.3f, %.3f, %.3f, %.3f]",
+                          U(4), U(5), U(6), U(7));
+    }
+
+    return true;
 }
 
 void MpcLocalPlanner::computeEquivalentTwist(const Eigen::VectorXd& U, geometry_msgs::Twist& cmd_vel)

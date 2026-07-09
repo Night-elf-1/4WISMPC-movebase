@@ -23,7 +23,7 @@ namespace mpc_local_planner
 class MpcLocalPlanner : public nav_core::BaseLocalPlanner
 {
 public:
-    enum class State { ALIGNING, TRACKING };
+    enum class State { ALIGNING, RECENTERING, TRACKING };
     MpcLocalPlanner();
     ~MpcLocalPlanner();
 
@@ -42,6 +42,7 @@ private:
     void publishWheelCommands(const Eigen::VectorXd& U);
     void publishZeroCommands() const;
     void computeEquivalentTwist(const Eigen::VectorXd& U, geometry_msgs::Twist& cmd_vel);
+    bool recenterSteering(geometry_msgs::Twist& cmd_vel);
     bool checkGoalReached(const Eigen::Vector3d& current_state,
                           double& dist_to_goal, double& dyaw) const;
 
@@ -50,7 +51,11 @@ private:
 
     // Alignment state
     State state_ = State::TRACKING;
-    double align_yaw_threshold_ = M_PI / 3.0;  // 60 deg
+    double align_yaw_threshold_ = M_PI / 3.0;  // 60 deg    进入原地旋转的阈值
+    double align_yaw_exit_threshold_ = M_PI / 18.0;  // 10 deg 退出原地旋转的阈值
+    double align_recenter_max_step_ = 0.05;    // rad per control cycle
+    double align_recenter_tolerance_ = 0.01;   // rad
+    Eigen::Vector4d align_recenter_steer_ = Eigen::Vector4d::Zero();
     double align_max_omega_ = 0.5;             // rad/s
     double align_kp_ = 1.0;
     double L_front_ = 0.4615;

@@ -17,6 +17,9 @@ MpcLocalPlanner:
   goal_yaw_tolerance: 0.2
 
   # 初始航向对齐：若当前航向与路径起始航向偏差超过阈值，先原地旋转对齐
-  align_yaw_threshold: 1.047   # rad, 60 deg
+  align_yaw_threshold: 1.047        # rad, 60 deg, 进入对准阈值
+  align_yaw_exit_threshold: 0.1745  # rad, 10 deg, 退出对准阈值
+  align_recenter_max_step: 0.05     # rad/control cycle, 对准结束后转角每周期最大回正步长
+  align_recenter_tolerance: 0.01    # rad, 转角回正完成判据
   align_max_omega: 0.5         # rad/s, 原地旋转最大角速度
   align_kp: 1.0                # 旋转控制比例增益
