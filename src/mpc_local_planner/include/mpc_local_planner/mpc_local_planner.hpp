@@ -88,6 +88,9 @@ private:
     ros::Publisher pub_steer_rear_L_;
     ros::Publisher pub_whell_rear_R_;
     ros::Publisher pub_steer_rear_R_;
+    ros::WallTime last_wheel_command_publish_time_;
+    ros::WallTime wheel_command_rate_window_start_;
+    int wheel_command_publish_count_ = 0;
 
     // Parameters
     double wheel_radius_ = 0.15;

@@ -262,6 +262,7 @@ bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
 
     // Solve MPC
     Eigen::VectorXd U_solve;
+    // ros::WallTime mpc_solve_start = ros::WallTime::now();
     try
     {
         U_solve = mpc_->mpc_solve(r_x_, r_y_, ryaw_, rcurvature_, speed_profile_,
@@ -269,22 +270,20 @@ bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     }
     catch (const std::exception& e)
     {
-        ROS_ERROR("MpcLocalPlanner MPC solve failed: %s", e.what());
+        // double solve_time_ms = (ros::WallTime::now() - mpc_solve_start).toSec() * 1000.0;
+        // ROS_ERROR("MpcLocalPlanner MPC solve failed after %.2f ms: %s", solve_time_ms, e.what());
         publishZeroCommands();
         return false;
     }
+    // double solve_time_ms = (ros::WallTime::now() - mpc_solve_start).toSec() * 1000.0;
+    // ROS_INFO("MpcLocalPlanner: MPC solve time %.2f ms, nearest_idx=%d, nearest_dist=%.3f",
+    //          solve_time_ms, min_index, min_e);
 
     // Publish wheel commands
     publishWheelCommands(U_solve);
 
     // 返回给 move_base 的 cmd_vel
     computeEquivalentTwist(U_solve, cmd_vel);
-
-    // ROS_INFO_THROTTLE(1.0,
-    //                   "MpcLocalPlanner: nearest_idx=%d, nearest_dist=%.3f, v=[%.2f, %.2f, %.2f, %.2f], steer=[%.3f, %.3f, %.3f, %.3f]",
-    //                   min_index, min_e,
-    //                   U_solve(0), U_solve(1), U_solve(2), U_solve(3),
-    //                   U_solve(4), U_solve(5), U_solve(6), U_solve(7));
 
     return true;
 }
@@ -574,10 +573,32 @@ void MpcLocalPlanner::publishWheelCommands(const Eigen::VectorXd& U)
 
     msg.data = U(7);
     pub_steer_front_R_.publish(msg);
-    ROS_INFO_THROTTLE(1.0,
-                      "MpcLocalPlanner: wheel_cmds=[%.2f, %.2f, %.2f, %.2f], steer_cmds=[%.3f, %.3f, %.3f, %.3f]",
-                      U(0), U(1), U(2), U(3),
-                      U(4), U(5), U(6), U(7));
+
+    // const ros::WallTime now = ros::WallTime::now();
+    // if (last_wheel_command_publish_time_.isZero())
+    // {
+    //     last_wheel_command_publish_time_ = now;
+    //     wheel_command_rate_window_start_ = now;
+    //     wheel_command_publish_count_ = 0;
+    // }
+    // else
+    // {
+    //     const double dt = (now - last_wheel_command_publish_time_).toSec();
+    //     last_wheel_command_publish_time_ = now;
+    //     ++wheel_command_publish_count_;
+
+    //     const double window_sec = (now - wheel_command_rate_window_start_).toSec();
+    //     if (window_sec >= 1.0)
+    //     {
+    //         const double avg_rate_hz = wheel_command_publish_count_ / window_sec;
+    //         const double latest_rate_hz = (dt > 1e-6) ? (1.0 / dt) : 0.0;
+    //         ROS_INFO("MpcLocalPlanner: wheel command publish rate avg=%.2f Hz, latest=%.2f Hz, dt=%.2f ms, samples=%d",
+    //                  avg_rate_hz, latest_rate_hz, dt * 1000.0, wheel_command_publish_count_);
+
+    //         wheel_command_rate_window_start_ = now;
+    //         wheel_command_publish_count_ = 0;
+    //     }
+    // }
 }
 
 void MpcLocalPlanner::publishZeroCommands() const
