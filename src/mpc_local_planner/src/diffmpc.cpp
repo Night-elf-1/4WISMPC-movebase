@@ -67,22 +67,25 @@ M_XREF_DIFF diffMpcController::build_horizon_reference(int min_index, std::vecto
                                                         std::vector<double>& cyaw, std::vector<double>& speed, double dl,
                                                         double current_v, int &target_ind) {
     M_XREF_DIFF xref = M_XREF_DIFF::Zero();
-    int ncourse = (int)cx.size();
-
+    int ncourse = (int)cx.size();   // 全局路径总点数
+    // 确定起始索引
     int ind = min_index;
+    // target_ind 是上一次 build_horizon_reference 结束时保存的索引（通过引用传进来）
+    // 如果上一次的索引比当前最近点还靠前，就沿用上一次的索引
     if (target_ind >= ind) ind = target_ind;
-
+    // 第 0 列被设为当前起始点
     xref(0, 0) = cx[ind];
     xref(1, 0) = cy[ind];
     xref(2, 0) = cyaw[ind];
     xref(3, 0) = speed[ind];
-
-    double travel = 0.0;
+    // 向前递推，填充后续列
+    double travel = 0.0;    // 按当前速度走多久/多远
     for (int i = 0; i < NMPC_T; i++) {
         travel += std::abs(current_v) * NMPC_DT;
-        int dind = (int)std::round(travel / dl);
-
-        int use_ind = (ind + dind < ncourse) ? (ind + dind) : (ncourse - 1);
+        int dind = (int)std::round(travel / dl);    // 把累计距离换算成全局路径索引的偏移量
+                                                    // 例如 travel = 0.5m，dl = 0.5m，则 dind = 1，取 ind 后面第 1 个点
+        int use_ind = (ind + dind < ncourse) ? (ind + dind) : (ncourse - 1);    // 防止超出路径末尾，超出就用最后一个点
+        // 把该点的 x, y, yaw, speed 填入 xref 的第 i 列
         xref(0, i) = cx[use_ind];
         xref(1, i) = cy[use_ind];
         xref(2, i) = cyaw[use_ind];

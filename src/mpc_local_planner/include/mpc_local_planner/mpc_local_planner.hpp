@@ -13,6 +13,7 @@
 
 #include <Eigen/Dense>
 #include <mutex>
+#include <tuple>
 #include <vector>
 
 #include "mpc_local_planner/nmpc_core/diffmpc.hpp"
@@ -23,7 +24,7 @@ namespace mpc_local_planner
 class MpcLocalPlanner : public nav_core::BaseLocalPlanner
 {
 public:
-    enum class State { ALIGNING, RECENTERING, TRACKING };
+    enum class State { ALIGN_STEERING, ALIGNING, RECENTERING, TRACKING };
     MpcLocalPlanner();
     ~MpcLocalPlanner();
 
@@ -33,14 +34,36 @@ public:
     bool isGoalReached() override;
 
 private:
+    void loadParameters(const ros::NodeHandle& private_nh);
+    void initializeRosInterfaces(ros::NodeHandle& nh);
+    void initializeMpc();
+
     void odomCallback(const nav_msgs::Odometry::ConstPtr& msg);
     double getYaw(const geometry_msgs::Quaternion& q) const;
     bool getRobotPose(Eigen::Vector3d& state) const;
+
     void convertPlanToReference(const std::vector<geometry_msgs::PoseStamped>& plan);
+    void setReferencePositions(const std::vector<geometry_msgs::PoseStamped>& plan);
+    void smoothReferencePath(int window);
+    void updateReferenceYaw();
+    void updateReferenceCurvature(int smoothing_window);
+    void updateSpeedProfile(int smoothing_window);
+    void applyStopProfile(double stop_distance);
     std::vector<double> smoothVector(const std::vector<double>& data, int window) const;
+
     std::tuple<int, double> calcForwardNearestIndex(double current_x, double current_y);
+    void updateStateForNewPlan();
+    bool prepareAlignmentSteering(const Eigen::Vector3d& current_state, geometry_msgs::Twist& cmd_vel);
+    bool handleAlignment(const Eigen::Vector3d& current_state, geometry_msgs::Twist& cmd_vel);
+    Eigen::VectorXd makeInPlaceRotationCommand(double omega) const;
+    bool stepSteeringToward(const Eigen::Vector4d& target, Eigen::Vector4d& stepped_steer) const;
+    void resetControlToReference(int min_index, double min_e);
+    void updateMpcModelState(const Eigen::Vector3d& state, int min_index);
+    bool solveMpcCommand(const Eigen::Vector3d& state, int min_index, double min_e, Eigen::VectorXd& U_solve);
+
     void publishWheelCommands(const Eigen::VectorXd& U);
     void publishZeroCommands() const;
+    void rememberSteeringCommand(const Eigen::VectorXd& U) const;
     void computeEquivalentTwist(const Eigen::VectorXd& U, geometry_msgs::Twist& cmd_vel);
     bool recenterSteering(geometry_msgs::Twist& cmd_vel);
     bool checkGoalReached(const Eigen::Vector3d& current_state,
@@ -56,6 +79,8 @@ private:
     double align_recenter_max_step_ = 0.05;    // rad per control cycle
     double align_recenter_tolerance_ = 0.01;   // rad
     Eigen::Vector4d align_recenter_steer_ = Eigen::Vector4d::Zero();
+    mutable Eigen::Vector4d last_steer_cmd_ = Eigen::Vector4d::Zero();
+    mutable bool has_last_steer_cmd_ = false;
     double align_max_omega_ = 0.5;             // rad/s
     double align_kp_ = 1.0;
     double L_front_ = 0.4615;
@@ -88,9 +113,6 @@ private:
     ros::Publisher pub_steer_rear_L_;
     ros::Publisher pub_whell_rear_R_;
     ros::Publisher pub_steer_rear_R_;
-    ros::WallTime last_wheel_command_publish_time_;
-    ros::WallTime wheel_command_rate_window_start_;
-    int wheel_command_publish_count_ = 0;
 
     // Parameters
     double wheel_radius_ = 0.15;
