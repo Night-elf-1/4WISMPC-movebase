@@ -12,14 +12,6 @@ PLUGINLIB_EXPORT_CLASS(mpc_local_planner::MpcLocalPlanner, nav_core::BaseLocalPl
 namespace mpc_local_planner
 {
 
-MpcLocalPlanner::MpcLocalPlanner()
-{
-}
-
-MpcLocalPlanner::~MpcLocalPlanner()
-{
-}
-
 void MpcLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap_2d::Costmap2DROS* costmap_ros)
 {
     if (initialized_)
@@ -28,7 +20,6 @@ void MpcLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap_
         return;
     }
 
-    name_ = name;
     tf_ = tf;
     costmap_ros_ = costmap_ros;
 
@@ -57,6 +48,10 @@ void MpcLocalPlanner::loadParameters(const ros::NodeHandle& private_nh)
     private_nh.param("wheel_radius", wheel_radius_, 0.15);
     private_nh.param("max_speed", max_speed_, 0.5);
     private_nh.param("target_speed", target_speed_, 0.5);
+    private_nh.param("max_wheel_speed", param_.control_limits.max_wheel_speed, max_speed_);
+    private_nh.param("max_wheel_acceleration", param_.control_limits.max_wheel_acceleration, 1.0);
+    private_nh.param("max_steering_angle", param_.control_limits.max_steering_angle, 0.8726646259971648);
+    private_nh.param("max_steering_rate", param_.control_limits.max_steering_rate, 0.5);
     private_nh.param("transform_timeout", transform_timeout_, 0.05);
     private_nh.param("forward_window", forward_window_, 80);
     private_nh.param("back_buffer", back_buffer_, 10);
@@ -69,15 +64,27 @@ void MpcLocalPlanner::loadParameters(const ros::NodeHandle& private_nh)
     private_nh.param("align_max_omega", align_max_omega_, 0.5);
     private_nh.param("align_kp", align_kp_, 1.0);
 
+    if (!areControlLimitsValid(param_.control_limits))
+    {
+        ROS_ERROR("MpcLocalPlanner received invalid control limits; using conservative defaults.");
+        param_.control_limits = ControlLimits();
+    }
+    if (!std::isfinite(max_speed_) || max_speed_ <= 0.0)
+    {
+        max_speed_ = param_.control_limits.max_wheel_speed;
+    }
+    max_speed_ = std::min(max_speed_, param_.control_limits.max_wheel_speed);
+    if (!std::isfinite(target_speed_) || target_speed_ <= 0.0)
+    {
+        target_speed_ = max_speed_;
+    }
+    target_speed_ = std::min(target_speed_, max_speed_);
+
     // MPC parameters from diffmpc.hpp defaults, allow override
     private_nh.param("L", param_.L, 0.4615);
     private_nh.param("W", param_.W, 0.4);
     private_nh.param("L_front", L_front_, 0.4615);
     private_nh.param("L_rear", L_rear_, 0.4725);
-    param_.NX = NMPC_NX;
-    param_.NU = NMPC_NU;
-    param_.NP = NMPC_T;
-    param_.NC = NMPC_T - 1;
     param_.dt = NMPC_DT;
 }
 
@@ -99,9 +106,9 @@ void MpcLocalPlanner::initializeRosInterfaces(ros::NodeHandle& nh)
 
 void MpcLocalPlanner::initializeMpc()
 {
-    // Initialize MPC
-    mpc_.reset(new diffMpcController(param_.NX, param_.NU, param_.NP, param_.NC));
-    agv_model_.reset(new KinematicModel_MPC(0.0, 0.0, 0.0, 0.0, param_.L, param_.W, param_.dt));
+    mpc_.reset(new diffMpcController());
+    last_control_command_ = Eigen::VectorXd::Zero(NMPC_NU);
+    has_last_control_command_ = false;
 }
 
 bool MpcLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& plan)
@@ -140,6 +147,10 @@ bool MpcLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& pla
 
     // 调用 mpc_->reset()，重置 MPC 内部上一拍控制量
     mpc_->reset();
+    if (has_last_control_command_ && last_control_command_.size() == NMPC_NU)
+    {
+        mpc_->U = last_control_command_;
+    }
 
     ROS_INFO("MpcLocalPlanner received plan with %zu points in frame '%s'.",
              plan.size(), plan_frame_.c_str());
@@ -195,20 +206,19 @@ bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     // 给 MPC 一个更合理的初值，避免偏离路径太远时优化器从奇怪的上一拍控制量开始算
     resetControlToReference(min_index, min_e);
 
-    // 更新运动学模型状态
-    updateMpcModelState(initial_x, min_index);
-
     // Solve MPC
     Eigen::VectorXd U_solve;
-    if (!solveMpcCommand(initial_x, min_index, min_e, U_solve))
+    if (!solveMpcCommand(initial_x, min_index, U_solve))
     {
         return false;
     }
-    // ROS_INFO("MpcLocalPlanner: min_index=%d, min_e=%.3f, U_solve=[%.3f, %.3f, %.3f, %.3f]",
-    //          min_index, min_e, U_solve(0), U_solve(1), U_solve(2), U_solve(3));
 
     // Publish wheel commands
-    publishWheelCommands(U_solve);
+    if (!publishWheelCommands(U_solve))
+    {
+        publishZeroCommands();
+        return false;
+    }
 
     // 返回给 move_base 的 cmd_vel
     computeEquivalentTwist(U_solve, cmd_vel);
@@ -216,34 +226,25 @@ bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     return true;
 }
 
-bool MpcLocalPlanner::checkGoalReached(const Eigen::Vector3d& current_state,
-                                       double& dist_to_goal, double& dyaw) const
+bool MpcLocalPlanner::checkGoalReached(const Eigen::Vector3d& current_state) const
 {
     if (!initialized_ || !has_plan_ || r_x_.empty())
     {
-        dist_to_goal = std::numeric_limits<double>::max();
-        dyaw = std::numeric_limits<double>::max();
         return false;
     }
 
     double dx = current_state(0) - r_x_.back();
     double dy = current_state(1) - r_y_.back();
-    dist_to_goal = std::sqrt(dx * dx + dy * dy);
-    dyaw = angles::shortest_angular_distance(current_state(2), ryaw_.back());
-    // cout << "检查结果：" << (dist_to_goal <= goal_xy_tolerance_ && std::fabs(dyaw) <= goal_yaw_tolerance_) << endl;
+    const double dist_to_goal = std::sqrt(dx * dx + dy * dy);
+    const double dyaw = angles::shortest_angular_distance(current_state(2), ryaw_.back());
 
     if (dist_to_goal <= goal_xy_tolerance_ && std::fabs(dyaw) <= goal_yaw_tolerance_)
     {
-        // ROS_INFO_ONCE("MpcLocalPlanner: reached goal");
         ROS_INFO("MpcLocalPlanner: reached goal");
         publishZeroCommands();
-        // cmd_vel = geometry_msgs::Twist();
         return true;
-    }else
-    {
-        return false;
     }
-    // return dist_to_goal <= goal_xy_tolerance_ && std::fabs(dyaw) <= goal_yaw_tolerance_;
+    return false;
 }
 
 bool MpcLocalPlanner::isGoalReached()
@@ -256,14 +257,14 @@ bool MpcLocalPlanner::isGoalReached()
         return false;
     }
 
-    double dist_to_goal = 0.0, dyaw = 0.0;
-    return checkGoalReached(current_state, dist_to_goal, dyaw);
+    return checkGoalReached(current_state);
 }
 
 void MpcLocalPlanner::odomCallback(const nav_msgs::Odometry::ConstPtr& msg)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    latest_odom_ = *msg;
+    latest_odom_pose_.header = msg->header;
+    latest_odom_pose_.pose = msg->pose.pose;
     has_odom_ = true;
 }
 
@@ -286,8 +287,7 @@ bool MpcLocalPlanner::getRobotPose(Eigen::Vector3d& state) const
         {
             return false;
         }
-        robot_pose.header = latest_odom_.header;
-        robot_pose.pose = latest_odom_.pose.pose;
+        robot_pose = latest_odom_pose_;
     }
 
     geometry_msgs::PoseStamped plan_pose;
@@ -587,7 +587,7 @@ std::tuple<int, double> MpcLocalPlanner::calcForwardNearestIndex(double current_
     // If forward window cannot find a reasonable point, fall back to global search
     if (mind > 5.0 && start_idx > 0)
     {
-        return mpc_->calc_ref_trajectory(current_x, current_y, r_x_, r_y_, ryaw_);
+        return mpc_->calc_ref_trajectory(current_x, current_y, r_x_, r_y_);
     }
 
     last_min_index_ = min_index;
@@ -638,15 +638,23 @@ bool MpcLocalPlanner::prepareAlignmentSteering(const Eigen::Vector3d& current_st
     const Eigen::VectorXd target_u = makeInPlaceRotationCommand(omega_sign);
     const Eigen::Vector4d target_steer(target_u(4), target_u(5), target_u(6), target_u(7));
     Eigen::Vector4d stepped_steer;
-    const bool steering_ready = stepSteeringToward(target_steer, stepped_steer);
+    const bool requested_steering_ready = stepSteeringToward(target_steer, stepped_steer);
 
-    Eigen::VectorXd U = Eigen::VectorXd::Zero(param_.NU);
+    Eigen::VectorXd U = Eigen::VectorXd::Zero(NMPC_NU);
     U(4) = stepped_steer(0);
     U(5) = stepped_steer(1);
     U(6) = stepped_steer(2);
     U(7) = stepped_steer(3);
-    publishWheelCommands(U);
+    if (!publishWheelCommands(U))
+    {
+        publishZeroCommands();
+        return false;
+    }
     cmd_vel = geometry_msgs::Twist();
+
+    const Eigen::Vector4d applied_steer(U(4), U(5), U(6), U(7));
+    const bool steering_ready = requested_steering_ready &&
+        (target_steer - applied_steer).cwiseAbs().maxCoeff() <= align_recenter_tolerance_;
 
     if (steering_ready)
     {
@@ -685,11 +693,13 @@ bool MpcLocalPlanner::handleAlignment(const Eigen::Vector3d& current_state, geom
     omega = std::max(-align_max_omega_, std::min(align_max_omega_, omega));
 
     Eigen::VectorXd U = makeInPlaceRotationCommand(omega);
+    if (!publishWheelCommands(U))
+    {
+        publishZeroCommands();
+        return false;
+    }
     align_recenter_steer_ << U(4), U(5), U(6), U(7);
-    publishWheelCommands(U);
-
-    cmd_vel = geometry_msgs::Twist();
-    cmd_vel.angular.z = omega;
+    computeEquivalentTwist(U, cmd_vel);
 
     ROS_INFO_THROTTLE(1.0,
                       "MpcLocalPlanner: aligning, err=%.2f deg, omega=%.3f",
@@ -702,7 +712,7 @@ Eigen::VectorXd MpcLocalPlanner::makeInPlaceRotationCommand(double omega) const
     // In-place rotation using the same formula as four_wheeldrive.cpp.
     const double R = 0.0;
     const double W = param_.W;
-    Eigen::VectorXd U(param_.NU);
+    Eigen::VectorXd U(NMPC_NU);
 
     const double angle_fl = std::atan(L_front_ / (R - W));
     U(0) = omega * (L_front_ / std::sin(angle_fl));
@@ -778,23 +788,17 @@ void MpcLocalPlanner::resetControlToReference(int min_index, double min_e)
     ROS_WARN_THROTTLE(1.0, "MpcLocalPlanner: lateral error %.3f, resetting control to reference.", min_e);
 }
 
-void MpcLocalPlanner::updateMpcModelState(const Eigen::Vector3d& state, int min_index)
-{
-    agv_model_->x   = state(0);
-    agv_model_->y   = state(1);
-    agv_model_->yaw = state(2);
-    agv_model_->v   = speed_profile_[min_index];
-}
-
 bool MpcLocalPlanner::solveMpcCommand(const Eigen::Vector3d& state,
                                       int min_index,
-                                      double min_e,
                                       Eigen::VectorXd& U_solve)
 {
     try
     {
-        U_solve = mpc_->mpc_solve(r_x_, r_y_, ryaw_, rcurvature_, speed_profile_,
-                                  state, min_index, min_e, *agv_model_, param_);
+        U_solve = mpc_->mpc_solve(r_x_, r_y_, ryaw_, speed_profile_,
+                                  state, min_index, speed_profile_[min_index], param_,
+                                  has_last_control_command_
+                                      ? last_control_command_
+                                      : Eigen::VectorXd::Zero(NMPC_NU));
     }
     catch (const std::exception&)
     {
@@ -805,8 +809,30 @@ bool MpcLocalPlanner::solveMpcCommand(const Eigen::Vector3d& state,
     return true;
 }
 
-void MpcLocalPlanner::publishWheelCommands(const Eigen::VectorXd& U)
+bool MpcLocalPlanner::publishWheelCommands(Eigen::VectorXd& U)
 {
+    const ros::WallTime now = ros::WallTime::now();
+    Eigen::VectorXd previous = Eigen::VectorXd::Zero(NMPC_NU);
+    double elapsed = param_.dt;
+
+    if (has_last_control_command_ && last_control_command_.size() == NMPC_NU)
+    {
+        previous = last_control_command_;
+        const double measured_elapsed = (now - last_control_command_time_).toSec();
+        if (std::isfinite(measured_elapsed) && measured_elapsed > 0.0)
+        {
+            // A missed cycle must not authorize an arbitrarily large command jump.
+            elapsed = std::min(measured_elapsed, param_.dt);
+        }
+    }
+    elapsed = std::max(elapsed, 1e-3);
+
+    if (!applyControlLimits(U, previous, elapsed, param_.control_limits))
+    {
+        ROS_ERROR_THROTTLE(1.0, "MpcLocalPlanner rejected an invalid wheel command.");
+        return false;
+    }
+
     std_msgs::Float64 msg;
 
     // Wheel angular velocities (rad/s) = linear velocity / wheel radius
@@ -836,6 +862,11 @@ void MpcLocalPlanner::publishWheelCommands(const Eigen::VectorXd& U)
     pub_steer_front_R_.publish(msg);
 
     rememberSteeringCommand(U);
+    last_control_command_ = U;
+    last_control_command_time_ = now;
+    has_last_control_command_ = true;
+    mpc_->U = U;
+    return true;
 }
 
 void MpcLocalPlanner::publishZeroCommands() const
@@ -853,6 +884,9 @@ void MpcLocalPlanner::publishZeroCommands() const
 
     has_last_steer_cmd_ = true;
     last_steer_cmd_.setZero();
+    last_control_command_ = Eigen::VectorXd::Zero(NMPC_NU);
+    last_control_command_time_ = ros::WallTime::now();
+    has_last_control_command_ = true;
 }
 
 void MpcLocalPlanner::rememberSteeringCommand(const Eigen::VectorXd& U) const
@@ -871,7 +905,7 @@ bool MpcLocalPlanner::recenterSteering(geometry_msgs::Twist& cmd_vel)
     const double step = std::max(1e-4, align_recenter_max_step_);
     const double tolerance = std::max(0.0, align_recenter_tolerance_);
 
-    Eigen::VectorXd U = Eigen::VectorXd::Zero(param_.NU);
+    Eigen::VectorXd U = Eigen::VectorXd::Zero(NMPC_NU);
     bool done = true;
 
     for (int i = 0; i < 4; ++i)
@@ -899,13 +933,18 @@ bool MpcLocalPlanner::recenterSteering(geometry_msgs::Twist& cmd_vel)
         }
     }
 
-    publishWheelCommands(U);
+    if (!publishWheelCommands(U))
+    {
+        publishZeroCommands();
+        return false;
+    }
+    align_recenter_steer_ << U(4), U(5), U(6), U(7);
+    done = align_recenter_steer_.cwiseAbs().maxCoeff() <= tolerance;
     cmd_vel = geometry_msgs::Twist();
 
     if (done)
     {
         align_recenter_steer_.setZero();
-        mpc_->U = Eigen::VectorXd::Zero(param_.NU);
         state_ = State::TRACKING;
         ROS_INFO("MpcLocalPlanner: steering recentered, switching to tracking.");
     }

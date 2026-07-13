@@ -47,6 +47,7 @@ include_directories(
 add_library(${PROJECT_NAME}
   src/mpc_local_planner.cpp
   src/diffmpc.cpp
+  src/control_limits.cpp
 )
 
 target_link_libraries(${PROJECT_NAME}
@@ -56,6 +57,24 @@ target_link_libraries(${PROJECT_NAME}
   pthread
   dl
 )
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(test_control_limits
+    test/test_control_limits.cpp
+    test/test_main.cpp
+  )
+  if(TARGET test_control_limits)
+    target_link_libraries(test_control_limits ${PROJECT_NAME})
+  endif()
+
+  catkin_add_gtest(test_diffmpc_reference
+    test/test_diffmpc_reference.cpp
+    test/test_main.cpp
+  )
+  if(TARGET test_diffmpc_reference)
+    target_link_libraries(test_diffmpc_reference ${PROJECT_NAME})
+  endif()
+endif()
 
 install(TARGETS ${PROJECT_NAME}
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}

@@ -1,6 +1,8 @@
 <launch>
 
     <node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen" clear_params="true">
+        <!-- 与 NMPC_DT=0.1s 对齐，使变化率约束对应真实控制周期 -->
+        <param name="controller_frequency" value="10.0"/>
         <!-- 使用 global_planner 作为全局规划器，并启用 A* -->
         <param name="base_global_planner" value="global_planner/GlobalPlanner"/>
         <rosparam file="$(find mpc_move_base)/param/global_planner_params.yaml" command="load" ns="GlobalPlanner" />

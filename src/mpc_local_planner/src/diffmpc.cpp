@@ -1,17 +1,15 @@
 #include "mpc_local_planner/nmpc_core/diffmpc.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+#include <limits>
+#include <string>
+
 // ===================== 工具函数：保留与线性版本一致的接口 =====================
 
 std::vector<double> diffMpcController::calculateReferenceSpeeds(const std::vector<double>& curvatures, const double& max_speed) {
     std::vector<double> referenceSpeeds;
-    // for (double k : curvatures) {
-    //     // 用倒数曲线根据曲率限速，避免大曲率处速度为负
-    //     double speed = max_speed / (1.0 + 3.0 * std::fabs(k));
-    //     speed = std::max(0.05, std::min(max_speed, speed));
-    //     referenceSpeeds.push_back(speed);
-    // }
-    // return referenceSpeeds;
-
     referenceSpeeds.reserve(curvatures.size()); 
     for (double k : curvatures) {
         // 用倒数曲线根据曲率限速
@@ -39,57 +37,98 @@ void diffMpcController::smooth_yaw(std::vector<double>& cyaw) {
 }
 
 static std::tuple<int, double> calc_nearest_index_diff(double current_x, double current_y,
-                                                         std::vector<double> cx, std::vector<double> cy,
-                                                         std::vector<double> cyaw) {
-    double mind = std::numeric_limits<double>::max();
+                                                         const std::vector<double>& cx,
+                                                         const std::vector<double>& cy) {
+    const size_t point_count = std::min(cx.size(), cy.size());
+    if (point_count == 0) {
+        return std::make_tuple(0, std::numeric_limits<double>::max());
+    }
+
+    double min_squared_distance = std::numeric_limits<double>::max();
     int ind = 0;
-    for (int i = 0; i < (int)cx.size(); i++) {
+    for (size_t i = 0; i < point_count; ++i) {
         double idx = current_x - cx[i];
         double idy = current_y - cy[i];
-        double d_e = std::sqrt(idx * idx + idy * idy);
-        if (d_e < mind) {
-            mind = d_e;
-            ind = i;
+        double squared_distance = idx * idx + idy * idy;
+        if (squared_distance < min_squared_distance) {
+            min_squared_distance = squared_distance;
+            ind = static_cast<int>(i);
         }
     }
-    return std::make_tuple(ind, mind);
+    return std::make_tuple(ind, std::sqrt(min_squared_distance));
 }
 
 std::tuple<int, double> diffMpcController::calc_ref_trajectory(double current_x, double current_y,
-                                                                 std::vector<double> cx, std::vector<double> cy,
-                                                                 std::vector<double> cyaw) {
-    auto [ind, d_e] = calc_nearest_index_diff(current_x, current_y, cx, cy, cyaw);
-    return std::make_tuple(ind, d_e);
+                                                                 const std::vector<double>& cx,
+                                                                 const std::vector<double>& cy) const {
+    return calc_nearest_index_diff(current_x, current_y, cx, cy);
 }
 
-// 构建预测时域内的参考轨迹 [x,y,yaw] x T （仿照 NMPC 单车版 calc_ref_trajectory 的弧长步进逻辑）
-M_XREF_DIFF diffMpcController::build_horizon_reference(int min_index, std::vector<double>& cx, std::vector<double>& cy,
-                                                        std::vector<double>& cyaw, std::vector<double>& speed, double dl,
-                                                        double current_v, int &target_ind) {
+// 按路径真实累计弧长插值预测参考，不依赖全局规划器的点间距。
+M_XREF_DIFF diffMpcController::build_horizon_reference(int min_index,
+                                                        const std::vector<double>& cx,
+                                                        const std::vector<double>& cy,
+                                                        const std::vector<double>& cyaw,
+                                                        const std::vector<double>& speed,
+                                                        double current_v,
+                                                        int& target_ind) {
     M_XREF_DIFF xref = M_XREF_DIFF::Zero();
-    int ncourse = (int)cx.size();   // 全局路径总点数
-    // 确定起始索引
-    int ind = min_index;
-    // target_ind 是上一次 build_horizon_reference 结束时保存的索引（通过引用传进来）
-    // 如果上一次的索引比当前最近点还靠前，就沿用上一次的索引
-    if (target_ind >= ind) ind = target_ind;
-    // 第 0 列被设为当前起始点
-    xref(0, 0) = cx[ind];
-    xref(1, 0) = cy[ind];
-    xref(2, 0) = cyaw[ind];
-    xref(3, 0) = speed[ind];
-    // 向前递推，填充后续列
-    double travel = 0.0;    // 按当前速度走多久/多远
-    for (int i = 0; i < NMPC_T; i++) {
-        travel += std::abs(current_v) * NMPC_DT;
-        int dind = (int)std::round(travel / dl);    // 把累计距离换算成全局路径索引的偏移量
-                                                    // 例如 travel = 0.5m，dl = 0.5m，则 dind = 1，取 ind 后面第 1 个点
-        int use_ind = (ind + dind < ncourse) ? (ind + dind) : (ncourse - 1);    // 防止超出路径末尾，超出就用最后一个点
-        // 把该点的 x, y, yaw, speed 填入 xref 的第 i 列
-        xref(0, i) = cx[use_ind];
-        xref(1, i) = cy[use_ind];
-        xref(2, i) = cyaw[use_ind];
-        xref(3, i) = speed[use_ind];
+    const size_t ncourse = std::min({cx.size(), cy.size(), cyaw.size(), speed.size()});
+    if (ncourse == 0) {
+        target_ind = 0;
+        return xref;
+    }
+
+    int ind = std::clamp(std::max(min_index, target_ind), 0,
+                         static_cast<int>(ncourse) - 1);
+    int segment_index = ind;
+    double segment_start_distance = 0.0;
+
+    auto sample_at_distance = [&](double target_distance, int column) {
+        constexpr double kMinSegmentLength = 1e-9;
+        while (segment_index + 1 < static_cast<int>(ncourse)) {
+            const double dx = cx[segment_index + 1] - cx[segment_index];
+            const double dy = cy[segment_index + 1] - cy[segment_index];
+            const double segment_length = std::hypot(dx, dy);
+
+            if (segment_length <= kMinSegmentLength) {
+                ++segment_index;
+                continue;
+            }
+
+            if (segment_start_distance + segment_length >= target_distance) {
+                const double alpha = std::clamp(
+                    (target_distance - segment_start_distance) / segment_length, 0.0, 1.0);
+                const double yaw_delta = std::atan2(
+                    std::sin(cyaw[segment_index + 1] - cyaw[segment_index]),
+                    std::cos(cyaw[segment_index + 1] - cyaw[segment_index]));
+                xref(0, column) = cx[segment_index] + alpha * dx;
+                xref(1, column) = cy[segment_index] + alpha * dy;
+                xref(2, column) = cyaw[segment_index] + alpha * yaw_delta;
+                xref(3, column) = speed[segment_index] +
+                                  alpha * (speed[segment_index + 1] - speed[segment_index]);
+                return;
+            }
+
+            segment_start_distance += segment_length;
+            ++segment_index;
+        }
+
+        const size_t last = ncourse - 1;
+        xref(0, column) = cx[last];
+        xref(1, column) = cy[last];
+        xref(2, column) = cyaw[last];
+        xref(3, column) = speed[last];
+    };
+
+    double travel = 0.0;
+    for (int i = 0; i < NMPC_T; ++i) {
+        if (i > 0) {
+            const double step_speed = (i == 1) ? std::abs(current_v)
+                                                : std::abs(xref(3, i - 1));
+            travel += step_speed * NMPC_DT;
+        }
+        sample_at_distance(travel, i);
     }
 
     target_ind = ind;
@@ -197,17 +236,17 @@ void FG_EVAL_DIFF::operator()(FG_EVAL_DIFF::ADvector &fg, const FG_EVAL_DIFF::AD
 
     // ---- 转向角/轮速变化率硬约束 ----
     int idx = 1 + 3 * NMPC_T; 
-    for (int i = 1; i < NMPC_T - 1; i++) {
-        fg[idx++] = vars[d1_start_ + i] - vars[d1_start_ + i - 1];
-        fg[idx++] = vars[d2_start_ + i] - vars[d2_start_ + i - 1];
-        fg[idx++] = vars[d3_start_ + i] - vars[d3_start_ + i - 1];
-        fg[idx++] = vars[d4_start_ + i] - vars[d4_start_ + i - 1];
+    for (int i = 0; i < NMPC_T - 1; i++) {
+        fg[idx++] = vars[d1_start_ + i] - ((i == 0) ? AD<double>(U_prev(4)) : vars[d1_start_ + i - 1]);
+        fg[idx++] = vars[d2_start_ + i] - ((i == 0) ? AD<double>(U_prev(5)) : vars[d2_start_ + i - 1]);
+        fg[idx++] = vars[d3_start_ + i] - ((i == 0) ? AD<double>(U_prev(6)) : vars[d3_start_ + i - 1]);
+        fg[idx++] = vars[d4_start_ + i] - ((i == 0) ? AD<double>(U_prev(7)) : vars[d4_start_ + i - 1]);
     }
-    for (int i = 1; i < NMPC_T - 1; i++) {
-        fg[idx++] = vars[v1_start_ + i] - vars[v1_start_ + i - 1];
-        fg[idx++] = vars[v2_start_ + i] - vars[v2_start_ + i - 1];
-        fg[idx++] = vars[v3_start_ + i] - vars[v3_start_ + i - 1];
-        fg[idx++] = vars[v4_start_ + i] - vars[v4_start_ + i - 1];
+    for (int i = 0; i < NMPC_T - 1; i++) {
+        fg[idx++] = vars[v1_start_ + i] - ((i == 0) ? AD<double>(U_prev(0)) : vars[v1_start_ + i - 1]);
+        fg[idx++] = vars[v2_start_ + i] - ((i == 0) ? AD<double>(U_prev(1)) : vars[v2_start_ + i - 1]);
+        fg[idx++] = vars[v3_start_ + i] - ((i == 0) ? AD<double>(U_prev(2)) : vars[v3_start_ + i - 1]);
+        fg[idx++] = vars[v4_start_ + i] - ((i == 0) ? AD<double>(U_prev(3)) : vars[v4_start_ + i - 1]);
     }
 
     // ---- 新增：刚体几何一致性等式约束 ----
@@ -235,24 +274,34 @@ void FG_EVAL_DIFF::operator()(FG_EVAL_DIFF::ADvector &fg, const FG_EVAL_DIFF::AD
     }
 }
 
-Eigen::VectorXd diffMpcController::mpc_solve(std::vector<double>& cx, std::vector<double>& cy, std::vector<double>& cyaw,
-                                              std::vector<double>& ck, std::vector<double>& speed, Eigen::Vector3d inital_x,
-                                              int min_index, double min_errors, KinematicModel_MPC agv_model, parameters params_) {
+Eigen::VectorXd diffMpcController::mpc_solve(const std::vector<double>& cx,
+                                              const std::vector<double>& cy,
+                                              const std::vector<double>& cyaw,
+                                              const std::vector<double>& speed,
+                                              const Eigen::Vector3d& initial_x,
+                                              int min_index,
+                                              double reference_speed,
+                                              const parameters& params_,
+                                              const Eigen::VectorXd& applied_control) {
     typedef CPPAD_TESTVECTOR(double) Dvector;
 
-    double x   = inital_x(0);
-    double y   = inital_x(1);
-    double yaw = inital_x(2);
+    double x   = initial_x(0);
+    double y   = initial_x(1);
+    double yaw = initial_x(2);
 
     if (target_ind_state < min_index) target_ind_state = min_index;
-    // 参考路径发布器以 0.5m 为间隔采样，dl 取 0.5 保证预测时域按实际弧长步进
-    M_XREF_DIFF traj_ref = build_horizon_reference(min_index, cx, cy, cyaw, speed, 0.5,
-                                                    agv_model.v, target_ind_state);
+    M_XREF_DIFF traj_ref = build_horizon_reference(min_index, cx, cy, cyaw, speed,
+                                                    reference_speed, target_ind_state);
 
     size_t n_vars = NMPC_T * 3 + (NMPC_T - 1) * 8;
     
-    // 修改：原本有 3T + 8*(T-2) 个约束。现在每个预测控制步增加 5 个约束，共增加 5 * (T-1) 个
-    size_t n_constraints = NMPC_T * 3 + 8 * (NMPC_T - 2) + 5 * (NMPC_T - 1);
+    // 初始/动力学 + 每一控制步的变化率 + 每一控制步的刚体几何约束。
+    size_t n_constraints = NMPC_T * 3 + 8 * (NMPC_T - 1) + 5 * (NMPC_T - 1);
+
+    Eigen::VectorXd previous_control = Eigen::VectorXd::Zero(NMPC_NU);
+    if (applied_control.size() == NMPC_NU && applied_control.allFinite()) {
+        previous_control = applied_control;
+    }
 
     Dvector vars(n_vars);
     for (size_t i = 0; i < n_vars; i++) vars[i] = 0.0;
@@ -262,14 +311,14 @@ Eigen::VectorXd diffMpcController::mpc_solve(std::vector<double>& cx, std::vecto
     vars[yaw_start_] = yaw;
 
     for (int i = 0; i < NMPC_T - 1; i++) {
-        vars[v1_start_ + i] = U(0);
-        vars[v2_start_ + i] = U(1);
-        vars[v3_start_ + i] = U(2);
-        vars[v4_start_ + i] = U(3);
-        vars[d1_start_ + i] = U(4);
-        vars[d2_start_ + i] = U(5);
-        vars[d3_start_ + i] = U(6);
-        vars[d4_start_ + i] = U(7);
+        vars[v1_start_ + i] = std::clamp(U(0), -params_.control_limits.max_wheel_speed, params_.control_limits.max_wheel_speed);
+        vars[v2_start_ + i] = std::clamp(U(1), -params_.control_limits.max_wheel_speed, params_.control_limits.max_wheel_speed);
+        vars[v3_start_ + i] = std::clamp(U(2), -params_.control_limits.max_wheel_speed, params_.control_limits.max_wheel_speed);
+        vars[v4_start_ + i] = std::clamp(U(3), -params_.control_limits.max_wheel_speed, params_.control_limits.max_wheel_speed);
+        vars[d1_start_ + i] = std::clamp(U(4), -params_.control_limits.max_steering_angle, params_.control_limits.max_steering_angle);
+        vars[d2_start_ + i] = std::clamp(U(5), -params_.control_limits.max_steering_angle, params_.control_limits.max_steering_angle);
+        vars[d3_start_ + i] = std::clamp(U(6), -params_.control_limits.max_steering_angle, params_.control_limits.max_steering_angle);
+        vars[d4_start_ + i] = std::clamp(U(7), -params_.control_limits.max_steering_angle, params_.control_limits.max_steering_angle);
     }
 
     {
@@ -313,14 +362,15 @@ Eigen::VectorXd diffMpcController::mpc_solve(std::vector<double>& cx, std::vecto
             vars_upperbound[i] = hi;
         }
     };
-    set_bounds(v1_start_, NMPC_V_MIN, NMPC_V_MAX);
-    set_bounds(v2_start_, NMPC_V_MIN, NMPC_V_MAX);
-    set_bounds(v3_start_, NMPC_V_MIN, NMPC_V_MAX);
-    set_bounds(v4_start_, NMPC_V_MIN, NMPC_V_MAX);
-    set_bounds(d1_start_, NMPC_DELTA_MIN, NMPC_DELTA_MAX);
-    set_bounds(d2_start_, NMPC_DELTA_MIN, NMPC_DELTA_MAX);
-    set_bounds(d3_start_, NMPC_DELTA_MIN, NMPC_DELTA_MAX);
-    set_bounds(d4_start_, NMPC_DELTA_MIN, NMPC_DELTA_MAX);
+    const auto& limits = params_.control_limits;
+    set_bounds(v1_start_, -limits.max_wheel_speed, limits.max_wheel_speed);
+    set_bounds(v2_start_, -limits.max_wheel_speed, limits.max_wheel_speed);
+    set_bounds(v3_start_, -limits.max_wheel_speed, limits.max_wheel_speed);
+    set_bounds(v4_start_, -limits.max_wheel_speed, limits.max_wheel_speed);
+    set_bounds(d1_start_, -limits.max_steering_angle, limits.max_steering_angle);
+    set_bounds(d2_start_, -limits.max_steering_angle, limits.max_steering_angle);
+    set_bounds(d3_start_, -limits.max_steering_angle, limits.max_steering_angle);
+    set_bounds(d4_start_, -limits.max_steering_angle, limits.max_steering_angle);
 
     Dvector constraints_lowerbound(n_constraints), constraints_upperbound(n_constraints);
     for (size_t i = 0; i < n_constraints; i++) {
@@ -336,17 +386,19 @@ Eigen::VectorXd diffMpcController::mpc_solve(std::vector<double>& cx, std::vecto
 
     {
         int off = NMPC_T * 3; 
-        for (int i = 1; i < NMPC_T - 1; i++) {
+        const double max_steering_step = limits.max_steering_rate * params_.dt;
+        const double max_speed_step = limits.max_wheel_acceleration * params_.dt;
+        for (int i = 0; i < NMPC_T - 1; i++) {
             for (int k = 0; k < 4; k++) {
-                constraints_lowerbound[off] = -NMPC_DDELTA_MAX;
-                constraints_upperbound[off] =  NMPC_DDELTA_MAX;
+                constraints_lowerbound[off] = -max_steering_step;
+                constraints_upperbound[off] =  max_steering_step;
                 off++;
             }
         }
-        for (int i = 1; i < NMPC_T - 1; i++) {
+        for (int i = 0; i < NMPC_T - 1; i++) {
             for (int k = 0; k < 4; k++) {
-                constraints_lowerbound[off] = -NMPC_DV_MAX;
-                constraints_upperbound[off] =  NMPC_DV_MAX;
+                constraints_lowerbound[off] = -max_speed_step;
+                constraints_upperbound[off] =  max_speed_step;
                 off++;
             }
         }
@@ -362,7 +414,7 @@ Eigen::VectorXd diffMpcController::mpc_solve(std::vector<double>& cx, std::vecto
         }
     }
 
-    FG_EVAL_DIFF fg_eval(traj_ref, U, params_.L, params_.W);
+    FG_EVAL_DIFF fg_eval(traj_ref, previous_control, params_.L, params_.W);
 
     std::string options;
     options += "Integer print_level  0\n";
@@ -379,10 +431,10 @@ Eigen::VectorXd diffMpcController::mpc_solve(std::vector<double>& cx, std::vecto
     if (!ok) {
         std::cout << "[diffMpcController] IPOPT 未能成功收敛, status=" << solution.status
                    << "，本周期沿用上一时刻控制量，避免采用病态解" << std::endl;
-        return U;
+        return previous_control;
     }
 
-    Eigen::VectorXd U_out(8);
+    Eigen::VectorXd U_out(NMPC_NU);
     U_out(0) = solution.x[v1_start_];
     U_out(1) = solution.x[v2_start_];
     U_out(2) = solution.x[v3_start_];
@@ -392,40 +444,6 @@ Eigen::VectorXd diffMpcController::mpc_solve(std::vector<double>& cx, std::vecto
     U_out(6) = solution.x[d3_start_];
     U_out(7) = solution.x[d4_start_];
 
-    U = U_out; 
-    // std::cout << "U_out: " << U_out.transpose() << std::endl;
+    U = U_out;
     return U_out;
-}
-
-// ===================== 车辆运动学更新（与原版一致，未改动） =====================
-
-void KinematicModel_MPC::updatestate(Eigen::VectorXd U_cmd) {
-    U = U_cmd;
-    double v1 = U(0), v2 = U(1), v3 = U(2), v4 = U(3);
-    double d1 = U(4), d2 = U(5), d3 = U(6), d4 = U(7);
-
-    double dx = 0.25 * (v1 * std::cos(d1 + yaw) + v2 * std::cos(d2 + yaw) +
-                        v3 * std::cos(d3 + yaw) + v4 * std::cos(d4 + yaw));
-    double dy = 0.25 * (v1 * std::sin(d1 + yaw) + v2 * std::sin(d2 + yaw) +
-                        v3 * std::sin(d3 + yaw) + v4 * std::sin(d4 + yaw));
-
-    double denom = 4.0 * (L * L + W * W);
-    double xw1 = L, yw1 = W;
-    double xw2 = -L, yw2 = W;
-    double xw3 = -L, yw3 = -W;
-    double xw4 = L, yw4 = -W;
-
-    double d_theta = ( (-yw1*std::cos(d1) + xw1*std::sin(d1))*v1 +
-                       (-yw2*std::cos(d2) + xw2*std::sin(d2))*v2 +
-                       (-yw3*std::cos(d3) + xw3*std::sin(d3))*v3 +
-                       (-yw4*std::cos(d4) + xw4*std::sin(d4))*v4 ) / denom;
-
-    x += dx * dt;
-    y += dy * dt;
-    yaw += d_theta * dt;
-    v = 0.25 * (v1 + v2 + v3 + v4);
-}
-
-std::tuple<double, double, double, double> KinematicModel_MPC::getstate() {
-    return std::make_tuple(x, y, yaw, v);
 }

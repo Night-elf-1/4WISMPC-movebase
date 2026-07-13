@@ -7,12 +7,13 @@
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/Twist.h>
 #include <nav_msgs/Odometry.h>
-#include <nav_msgs/Path.h>
 #include <std_msgs/Float64.h>
 #include <tf2_ros/buffer.h>
 
 #include <Eigen/Dense>
+#include <memory>
 #include <mutex>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -25,8 +26,8 @@ class MpcLocalPlanner : public nav_core::BaseLocalPlanner
 {
 public:
     enum class State { ALIGN_STEERING, ALIGNING, RECENTERING, TRACKING };
-    MpcLocalPlanner();
-    ~MpcLocalPlanner();
+    MpcLocalPlanner() = default;
+    ~MpcLocalPlanner() override = default;
 
     void initialize(std::string name, tf2_ros::Buffer* tf, costmap_2d::Costmap2DROS* costmap_ros) override;
     bool setPlan(const std::vector<geometry_msgs::PoseStamped>& plan) override;
@@ -63,19 +64,16 @@ private:
     Eigen::VectorXd makeInPlaceRotationCommand(double omega) const;
     bool stepSteeringToward(const Eigen::Vector4d& target, Eigen::Vector4d& stepped_steer) const;
     void resetControlToReference(int min_index, double min_e);
-    void updateMpcModelState(const Eigen::Vector3d& state, int min_index);
-    bool solveMpcCommand(const Eigen::Vector3d& state, int min_index, double min_e, Eigen::VectorXd& U_solve);
+    bool solveMpcCommand(const Eigen::Vector3d& state, int min_index, Eigen::VectorXd& U_solve);
 
-    void publishWheelCommands(const Eigen::VectorXd& U);
+    bool publishWheelCommands(Eigen::VectorXd& U);
     void publishZeroCommands() const;
     void rememberSteeringCommand(const Eigen::VectorXd& U) const;
     void computeEquivalentTwist(const Eigen::VectorXd& U, geometry_msgs::Twist& cmd_vel);
     bool recenterSteering(geometry_msgs::Twist& cmd_vel);
-    bool checkGoalReached(const Eigen::Vector3d& current_state,
-                          double& dist_to_goal, double& dyaw) const;
+    bool checkGoalReached(const Eigen::Vector3d& current_state) const;
 
     bool initialized_ = false;
-    std::string name_;
 
     // Alignment state
     State state_ = State::TRACKING;
@@ -86,6 +84,9 @@ private:
     Eigen::Vector4d align_recenter_steer_ = Eigen::Vector4d::Zero();
     mutable Eigen::Vector4d last_steer_cmd_ = Eigen::Vector4d::Zero();
     mutable bool has_last_steer_cmd_ = false;
+    mutable Eigen::VectorXd last_control_command_;
+    mutable ros::WallTime last_control_command_time_;
+    mutable bool has_last_control_command_ = false;
     double align_max_omega_ = 0.5;             // rad/s
     double align_kp_ = 1.0;
     double L_front_ = 0.4615;
@@ -96,7 +97,6 @@ private:
     // MPC
     parameters param_;
     std::unique_ptr<diffMpcController> mpc_;
-    std::unique_ptr<KinematicModel_MPC> agv_model_;
 
     // Reference trajectory
     std::vector<double> r_x_, r_y_, ryaw_, rcurvature_, speed_profile_;
@@ -106,7 +106,7 @@ private:
 
     // Odometry
     ros::Subscriber odom_sub_;
-    nav_msgs::Odometry latest_odom_;
+    geometry_msgs::PoseStamped latest_odom_pose_;
     bool has_odom_ = false;
     mutable std::mutex mutex_;
 
