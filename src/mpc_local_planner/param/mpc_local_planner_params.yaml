@@ -9,6 +9,7 @@ MpcLocalPlanner:
   # 参考速度/轨迹参数
   max_speed: 0.8         # 最大允许速度 [m/s]
   target_speed: 0.8      # 目标巡航速度 [m/s]
+  transform_timeout: 0.05 # TF 坐标变换最长等待时间 [s]
   forward_window: 80     # 前向搜索最近点窗口大小
   back_buffer: 10        # 后向搜索缓冲大小
 

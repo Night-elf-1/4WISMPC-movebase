@@ -57,6 +57,7 @@ void MpcLocalPlanner::loadParameters(const ros::NodeHandle& private_nh)
     private_nh.param("wheel_radius", wheel_radius_, 0.15);
     private_nh.param("max_speed", max_speed_, 0.5);
     private_nh.param("target_speed", target_speed_, 0.5);
+    private_nh.param("transform_timeout", transform_timeout_, 0.05);
     private_nh.param("forward_window", forward_window_, 80);
     private_nh.param("back_buffer", back_buffer_, 10);
     private_nh.param("goal_xy_tolerance", goal_xy_tolerance_, 0.10);
@@ -117,8 +118,22 @@ bool MpcLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& pla
         return false;
     }
 
+    const std::string plan_frame = plan.front().header.frame_id;
+    if (plan_frame.empty())
+    {
+        ROS_ERROR("MpcLocalPlanner received a plan without a frame_id.");
+        return false;
+    }
+
+    std::vector<geometry_msgs::PoseStamped> normalized_plan;
+    if (!normalizePlanFrames(plan, plan_frame, normalized_plan))
+    {
+        return false;
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);
-    convertPlanToReference(plan);   // 调用 convertPlanToReference(plan)，把 ROS 路径转成 MPC 参考轨迹
+    plan_frame_ = plan_frame;
+    convertPlanToReference(normalized_plan);   // 把统一坐标系下的 ROS 路径转成 MPC 参考轨迹
     last_min_index_ = 0;    // 重置最近点索引
     has_plan_ = true;   
     updateStateForNewPlan();
@@ -126,7 +141,8 @@ bool MpcLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& pla
     // 调用 mpc_->reset()，重置 MPC 内部上一拍控制量
     mpc_->reset();
 
-    ROS_INFO("MpcLocalPlanner received plan with %zu points.", plan.size());
+    ROS_INFO("MpcLocalPlanner received plan with %zu points in frame '%s'.",
+             plan.size(), plan_frame_.c_str());
     return true;
 }
 
@@ -188,6 +204,8 @@ bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     {
         return false;
     }
+    // ROS_INFO("MpcLocalPlanner: min_index=%d, min_e=%.3f, U_solve=[%.3f, %.3f, %.3f, %.3f]",
+    //          min_index, min_e, U_solve(0), U_solve(1), U_solve(2), U_solve(3));
 
     // Publish wheel commands
     publishWheelCommands(U_solve);
@@ -268,15 +286,109 @@ bool MpcLocalPlanner::getRobotPose(Eigen::Vector3d& state) const
         {
             return false;
         }
-        state << latest_odom_.pose.pose.position.x,
-                 latest_odom_.pose.pose.position.y,
-                 getYaw(latest_odom_.pose.pose.orientation);
+        robot_pose.header = latest_odom_.header;
+        robot_pose.pose = latest_odom_.pose.pose;
+    }
+
+    geometry_msgs::PoseStamped plan_pose;
+    if (!transformPoseToPlanFrame(robot_pose, plan_pose))
+    {
+        return false;
+    }
+
+    state << plan_pose.pose.position.x,
+             plan_pose.pose.position.y,
+             getYaw(plan_pose.pose.orientation);
+    return true;
+}
+
+bool MpcLocalPlanner::transformPoseToPlanFrame(
+    const geometry_msgs::PoseStamped& source_pose,
+    geometry_msgs::PoseStamped& plan_pose) const
+{
+    if (source_pose.header.frame_id.empty())
+    {
+        ROS_ERROR_THROTTLE(1.0, "MpcLocalPlanner cannot transform a pose without a frame_id.");
+        return false;
+    }
+
+    if (plan_frame_.empty())
+    {
+        ROS_ERROR_THROTTLE(1.0, "MpcLocalPlanner has no plan frame for pose transformation.");
+        return false;
+    }
+
+    if (source_pose.header.frame_id == plan_frame_)
+    {
+        plan_pose = source_pose;
         return true;
     }
 
-    state << robot_pose.pose.position.x,
-             robot_pose.pose.position.y,
-             getYaw(robot_pose.pose.orientation);
+    if (tf_ == nullptr)
+    {
+        ROS_ERROR_THROTTLE(1.0, "MpcLocalPlanner has no TF buffer for pose transformation.");
+        return false;
+    }
+
+    try
+    {
+        tf_->transform(source_pose, plan_pose, plan_frame_, ros::Duration(transform_timeout_));
+    }
+    catch (const tf2::TransformException& ex)
+    {
+        ROS_WARN_THROTTLE(1.0,
+                          "MpcLocalPlanner failed to transform robot pose from '%s' to '%s': %s",
+                          source_pose.header.frame_id.c_str(), plan_frame_.c_str(), ex.what());
+        return false;
+    }
+
+    return true;
+}
+
+bool MpcLocalPlanner::normalizePlanFrames(
+    const std::vector<geometry_msgs::PoseStamped>& plan,
+    const std::string& plan_frame,
+    std::vector<geometry_msgs::PoseStamped>& normalized_plan) const
+{
+    normalized_plan.clear();
+    normalized_plan.reserve(plan.size());
+
+    for (size_t i = 0; i < plan.size(); ++i)
+    {
+        geometry_msgs::PoseStamped source_pose = plan[i];
+        if (source_pose.header.frame_id.empty())
+        {
+            ROS_ERROR("MpcLocalPlanner plan pose %zu has no frame_id.", i);
+            return false;
+        }
+
+        if (source_pose.header.frame_id == plan_frame)
+        {
+            normalized_plan.push_back(std::move(source_pose));
+            continue;
+        }
+
+        if (tf_ == nullptr)
+        {
+            ROS_ERROR("MpcLocalPlanner has no TF buffer to normalize plan frames.");
+            return false;
+        }
+
+        geometry_msgs::PoseStamped transformed_pose;
+        try
+        {
+            tf_->transform(source_pose, transformed_pose, plan_frame,
+                           ros::Duration(transform_timeout_));
+        }
+        catch (const tf2::TransformException& ex)
+        {
+            ROS_ERROR("MpcLocalPlanner failed to transform plan pose from '%s' to '%s': %s",
+                      source_pose.header.frame_id.c_str(), plan_frame.c_str(), ex.what());
+            return false;
+        }
+        normalized_plan.push_back(std::move(transformed_pose));
+    }
+
     return true;
 }
 

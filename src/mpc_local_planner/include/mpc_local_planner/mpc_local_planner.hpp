@@ -41,6 +41,11 @@ private:
     void odomCallback(const nav_msgs::Odometry::ConstPtr& msg);
     double getYaw(const geometry_msgs::Quaternion& q) const;
     bool getRobotPose(Eigen::Vector3d& state) const;
+    bool transformPoseToPlanFrame(const geometry_msgs::PoseStamped& source_pose,
+                                  geometry_msgs::PoseStamped& plan_pose) const;
+    bool normalizePlanFrames(const std::vector<geometry_msgs::PoseStamped>& plan,
+                             const std::string& plan_frame,
+                             std::vector<geometry_msgs::PoseStamped>& normalized_plan) const;
 
     void convertPlanToReference(const std::vector<geometry_msgs::PoseStamped>& plan);
     void setReferencePositions(const std::vector<geometry_msgs::PoseStamped>& plan);
@@ -95,6 +100,7 @@ private:
 
     // Reference trajectory
     std::vector<double> r_x_, r_y_, ryaw_, rcurvature_, speed_profile_;
+    std::string plan_frame_;
     bool has_plan_ = false;
     int last_min_index_ = 0;
 
@@ -118,6 +124,7 @@ private:
     double wheel_radius_ = 0.15;
     double max_speed_ = 1.5;
     double target_speed_ = 1.0;
+    double transform_timeout_ = 0.05;
     int forward_window_ = 80;
     int back_buffer_ = 10;
     double goal_xy_tolerance_ = 0.1;
