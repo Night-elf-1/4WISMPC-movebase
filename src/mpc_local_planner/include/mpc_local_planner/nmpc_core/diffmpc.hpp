@@ -53,13 +53,15 @@ static const int d4_start_  = d3_start_  + (NMPC_T - 1);
 // ============== NMPC 代价/约束函数对象 (供 CppAD::ipopt::solve 使用) ==============
 class FG_EVAL_DIFF {
 public:
-    M_XREF_DIFF traj_ref;     // 参考轨迹 [x;y;yaw] x T
+    M_XREF_DIFF traj_ref;     // 参考轨迹 [x; y; yaw; v_ref] x T
     Eigen::VectorXd U_prev;   // 上一时刻实际控制量(8维)，用于控制量平滑代价
     double L, W;
-
+    // 构造函数声明
     FG_EVAL_DIFF(const M_XREF_DIFF &trajRef, const Eigen::VectorXd &uPrev, double L_, double W_);
 
     typedef CPPAD_TESTVECTOR(AD<double>) ADvector;
+    // 这是函数调用运算符重载。它让一个 FG_EVAL_DIFF 对象可以像函数一样调用
+    // fg 是输出参数    vars 是输入决策变量
     void operator()(ADvector &fg, const ADvector &vars);
 };
 

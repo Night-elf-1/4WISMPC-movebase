@@ -124,14 +124,13 @@ bool MpcLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& pla
         ROS_WARN("Received empty plan.");
         return false;
     }
-
+    // 将全局规划器的路径统一转换到同一个坐标系下，方便后续计算
     const std::string plan_frame = plan.front().header.frame_id;
     if (plan_frame.empty())
     {
         ROS_ERROR("MpcLocalPlanner received a plan without a frame_id.");
         return false;
     }
-
     std::vector<geometry_msgs::PoseStamped> normalized_plan;
     if (!normalizePlanFrames(plan, plan_frame, normalized_plan))
     {
@@ -139,7 +138,7 @@ bool MpcLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& pla
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
-    plan_frame_ = plan_frame;
+    plan_frame_ = plan_frame;   // 将路径坐标系存储为成员变量
     convertPlanToReference(normalized_plan);   // 把统一坐标系下的 ROS 路径转成 MPC 参考轨迹
     last_min_index_ = 0;    // 重置最近点索引
     has_plan_ = true;   
@@ -420,18 +419,19 @@ std::vector<double> MpcLocalPlanner::smoothVector(const std::vector<double>& dat
 // 将接收到的全局路径转换为参考轨迹，包括位置、航向、曲率和速度
 void MpcLocalPlanner::convertPlanToReference(const std::vector<geometry_msgs::PoseStamped>& plan)
 {
+    // 先清空之前的参考轨迹数据
     r_x_.clear();
     r_y_.clear();
     ryaw_.clear();
     rcurvature_.clear();
     speed_profile_.clear();
-
-    const int path_smooth_window = 9;
+    // 计算参考轨迹的平滑路径、航向角、曲率和速度
+    const int path_smooth_window = 3;       // 1为不平滑，3为轻微平滑，9为较强平滑
     const int speed_smooth_window = 5;
     const int curvature_smooth_window = 5;
     const double stop_distance = 0.4;
 
-    setReferencePositions(plan);
+    setReferencePositions(plan);    // 这里传入的 plan 已经是统一坐标系下的 ROS 路径
     smoothReferencePath(path_smooth_window);
     updateReferenceYaw();
     updateReferenceCurvature(curvature_smooth_window);
@@ -441,6 +441,7 @@ void MpcLocalPlanner::convertPlanToReference(const std::vector<geometry_msgs::Po
 
 void MpcLocalPlanner::setReferencePositions(const std::vector<geometry_msgs::PoseStamped>& plan)
 {
+    // 简单的将 ROS 路径的 x,y 坐标提取到 r_x_ 和 r_y_ 中
     for (const auto& pose : plan)
     {
         r_x_.push_back(pose.pose.position.x);
@@ -454,7 +455,7 @@ void MpcLocalPlanner::smoothReferencePath(int window)
     // 但保持首尾点不变，避免终点被拖离原始目标位置
     std::vector<double> sx = smoothVector(r_x_, window);
     std::vector<double> sy = smoothVector(r_y_, window);
-
+    // 将首尾点恢复为原始路径的首尾点，避免平滑后偏离目标
     if (!r_x_.empty())
     {
         sx.front() = r_x_.front();
@@ -465,7 +466,7 @@ void MpcLocalPlanner::smoothReferencePath(int window)
         sy.front() = r_y_.front();
         sy.back()  = r_y_.back();
     }
-
+    // 将平滑后的路径赋值回 r_x_ 和 r_y_
     r_x_ = std::move(sx);
     r_y_ = std::move(sy);
 }
@@ -474,10 +475,12 @@ void MpcLocalPlanner::updateReferenceYaw()
 {
     // 从平滑后的坐标重新计算航向角（不依赖 pose.orientation，兼容性更好）
     ryaw_.resize(r_x_.size(), 0.0);
+    // 计算航向角时，使用前后点的差分来估计切线方向，避免使用当前点和下一个点的差分，这样可以更平滑
     for (size_t i = 0; i < r_x_.size(); ++i)
     {
-        size_t ip1 = std::min(i + 1, r_x_.size() - 1);
-        size_t im1 = (i == 0) ? 0 : i - 1;
+        size_t ip1 = std::min(i + 1, r_x_.size() - 1);  // 下一个点索引，防止越界
+        size_t im1 = (i == 0) ? 0 : i - 1;  // 上一个点索引，首点时使用自身
+        // dx 和 dy 实际上构成了当前点所在位置的近似切线向量
         double dx = r_x_[ip1] - r_x_[im1];
         double dy = r_y_[ip1] - r_y_[im1];
         ryaw_[i] = std::atan2(dy, dx);
@@ -491,6 +494,8 @@ void MpcLocalPlanner::updateReferenceCurvature(int smoothing_window)
 {
     // 计算曲率
     rcurvature_.resize(r_x_.size(), 0.0);
+    // 计算某一个点的曲率，至少需要知道它的“前一个点”和“后一个点”。因此，路径的第一个点（没有前一个点）
+    // 和最后一个点（没有后一个点）无法直接计算，代码选择直接赋予它们 0.0（即视为直道），然后跳过当前循环
     for (size_t i = 0; i < r_x_.size(); ++i)
     {
         if (i == 0 || i + 1 >= r_x_.size())
@@ -498,7 +503,8 @@ void MpcLocalPlanner::updateReferenceCurvature(int smoothing_window)
             rcurvature_[i] = 0.0;
             continue;
         }
-
+        // 计算的是相邻点之间的距离 ds1 是当前点到下一个点的距离    ds0 是前一个点到当前点的距离
+        // ds 是这两段距离的平均值  用这个平均值 ds 来近似代替微分几何中的微元弧长
         size_t ip1 = i + 1;
         size_t im1 = i - 1;
         double dx1 = r_x_[ip1] - r_x_[i];
@@ -508,13 +514,14 @@ void MpcLocalPlanner::updateReferenceCurvature(int smoothing_window)
         double ds1 = std::sqrt(dx1 * dx1 + dy1 * dy1);
         double ds0 = std::sqrt(dx0 * dx0 + dy0 * dy0);
         double ds = 0.5 * (ds1 + ds0);
-
+        // 用到了上一轮（updateReferenceYaw）计算出来的航向角 ryaw_
         double dyaw = ryaw_[ip1] - ryaw_[im1];
         dyaw = angles::normalize_angle(dyaw);
-
+        // 曲率公式：kappa = dtheta / ds
+        // 安全保护 (ds > 1e-6)： 如果两个路径点重合（距离极小，接近 0），
+        // 作为分母会导致“除以零”的严重崩溃。因此加上条件判断，如果距离太小，直接把曲率设为 0
         rcurvature_[i] = (ds > 1e-6) ? (dyaw / ds) : 0.0;
     }
-
     // 平滑曲率，避免速度曲线剧烈抖动
     rcurvature_ = smoothVector(rcurvature_, smoothing_window);
 }
@@ -522,6 +529,7 @@ void MpcLocalPlanner::updateReferenceCurvature(int smoothing_window)
 void MpcLocalPlanner::updateSpeedProfile(int smoothing_window)
 {
     // 计算参考速度，考虑曲率和最大速度约束
+    // rcurvature_是上一步中计算出来的曲率，target_speed_是用户在参数中设置的目标速度
     speed_profile_ = mpc_->calculateReferenceSpeeds(rcurvature_, target_speed_);
 
     // 把速度钳制在 [min_speed, max_speed] 范围内
@@ -530,8 +538,9 @@ void MpcLocalPlanner::updateSpeedProfile(int smoothing_window)
     {
         v = std::max(min_speed, std::min(max_speed_, v));
     }
-
     // 对速度曲线做滑动平均平滑，避免急弯处速度骤降导致 MPC 急刹停住
+    // 消除相邻路径点速度变化过大的问题
+    // 例如 smoothing_window=5 时，一个速度点会参考它附近最多 5 个点的平均值，使速度曲线更加连续
     speed_profile_ = smoothVector(speed_profile_, smoothing_window);
 }
 
@@ -624,7 +633,7 @@ bool MpcLocalPlanner::prepareAlignmentSteering(const Eigen::Vector3d& current_st
         publishZeroCommands();
         return false;
     }
-
+    // 如果当前航向已经接近目标航向，则直接进入 RECENTERING 状态，避免不必要的原地旋转
     const double heading_error = angles::shortest_angular_distance(current_state(2), ryaw_[0]);
     if (std::fabs(heading_error) <= align_yaw_exit_threshold_)
     {
@@ -633,13 +642,15 @@ bool MpcLocalPlanner::prepareAlignmentSteering(const Eigen::Vector3d& current_st
                  heading_error * 180.0 / M_PI, align_yaw_exit_threshold_ * 180.0 / M_PI);
         return recenterSteering(cmd_vel);
     }
-
+    // 计算旋转方向，正值表示逆时针旋转，负值表示顺时针旋转
     const double omega_sign = (heading_error >= 0.0) ? 1.0 : -1.0;
+    // 生成原地旋转的目标控制量，包括轮速和转角
     const Eigen::VectorXd target_u = makeInPlaceRotationCommand(omega_sign);
     const Eigen::Vector4d target_steer(target_u(4), target_u(5), target_u(6), target_u(7));
     Eigen::Vector4d stepped_steer;
+    // 将当前转角逐步调整到目标转角，避免一次性跳变
     const bool requested_steering_ready = stepSteeringToward(target_steer, stepped_steer);
-
+    // 将逐步调整后的转角写入控制量 U，轮速保持为 0
     Eigen::VectorXd U = Eigen::VectorXd::Zero(NMPC_NU);
     U(4) = stepped_steer(0);
     U(5) = stepped_steer(1);
@@ -651,11 +662,12 @@ bool MpcLocalPlanner::prepareAlignmentSteering(const Eigen::Vector3d& current_st
         return false;
     }
     cmd_vel = geometry_msgs::Twist();
-
+    // 检查当前转角是否已经接近目标转角，如果接近则可以进入 ALIGNING 状态，开始原地旋转
     const Eigen::Vector4d applied_steer(U(4), U(5), U(6), U(7));
+    // cwiseAbs().maxCoeff() 表示取四个轮子中最大的转角误差。只有所有轮子的误差都不超过 0.01 rad，才认为准备完成
     const bool steering_ready = requested_steering_ready &&
         (target_steer - applied_steer).cwiseAbs().maxCoeff() <= align_recenter_tolerance_;
-
+    // 如果转角已经准备好，则进入 ALIGNING 状态，开始原地旋转
     if (steering_ready)
     {
         align_recenter_steer_ = target_steer;
