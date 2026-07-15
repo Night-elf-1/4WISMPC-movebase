@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "mpc_local_planner/nmpc_core/diffmpc.hpp"
+#include "mpc_local_planner/planner_utils.hpp"
 
 namespace mpc_local_planner
 {
@@ -25,7 +26,17 @@ namespace mpc_local_planner
 class MpcLocalPlanner : public nav_core::BaseLocalPlanner
 {
 public:
-    enum class State { ALIGN_STEERING, ALIGNING, RECENTERING, TRACKING };
+    enum class State
+    {
+        ALIGN_STEERING,
+        ALIGNING,
+        RECENTERING,
+        TRACKING,
+        GOAL_ALIGN_STEERING,
+        GOAL_ALIGNING,
+        GOAL_RECENTERING,
+        GOAL_HOLD
+    };
     MpcLocalPlanner() = default;
     ~MpcLocalPlanner() override = default;
 
@@ -55,21 +66,33 @@ private:
     void updateReferenceCurvature(int smoothing_window);
     void updateSpeedProfile(int smoothing_window);
     void applyStopProfile(double stop_distance);
-    std::vector<double> smoothVector(const std::vector<double>& data, int window) const;
 
     std::tuple<int, double> calcForwardNearestIndex(double current_x, double current_y);
     void updateStateForNewPlan();
     bool prepareAlignmentSteering(const Eigen::Vector3d& current_state, geometry_msgs::Twist& cmd_vel);
     bool handleAlignment(const Eigen::Vector3d& current_state, geometry_msgs::Twist& cmd_vel);
+    bool prepareGoalAlignmentSteering(const Eigen::Vector3d& current_state,
+                                      geometry_msgs::Twist& cmd_vel);
+    bool handleGoalAlignment(const Eigen::Vector3d& current_state,
+                             geometry_msgs::Twist& cmd_vel);
+    bool startGoalRecenter(const Eigen::Vector3d& current_state,
+                           geometry_msgs::Twist& cmd_vel);
+    bool recenterGoalSteering(const Eigen::Vector3d& current_state,
+                              geometry_msgs::Twist& cmd_vel);
+    bool holdGoal(geometry_msgs::Twist& cmd_vel);
+    GoalEvaluation evaluateCurrentGoal(const Eigen::Vector3d& current_state) const;
     Eigen::VectorXd makeInPlaceRotationCommand(double omega) const;
+    Eigen::Vector4d makeInPlaceSteeringTarget() const;
     bool stepSteeringToward(const Eigen::Vector4d& target, Eigen::Vector4d& stepped_steer) const;
     void resetControlToReference(int min_index, double min_e);
     bool solveMpcCommand(const Eigen::Vector3d& state, int min_index, Eigen::VectorXd& U_solve);
 
     bool publishWheelCommands(Eigen::VectorXd& U);
     void publishZeroCommands() const;
+    void publishStoppedCommands() const;
     void rememberSteeringCommand(const Eigen::VectorXd& U) const;
     void computeEquivalentTwist(const Eigen::VectorXd& U, geometry_msgs::Twist& cmd_vel);
+    bool applySteeringRecenterStep(geometry_msgs::Twist& cmd_vel, bool& done);
     bool recenterSteering(geometry_msgs::Twist& cmd_vel);
     bool checkGoalReached(const Eigen::Vector3d& current_state) const;
 
@@ -100,6 +123,8 @@ private:
 
     // Reference trajectory
     std::vector<double> r_x_, r_y_, ryaw_, rcurvature_, speed_profile_;
+    GoalPose2D goal_;
+    bool has_goal_ = false;
     std::string plan_frame_;
     bool has_plan_ = false;
     int last_min_index_ = 0;
@@ -127,8 +152,11 @@ private:
     double transform_timeout_ = 0.05;
     int forward_window_ = 80;
     int back_buffer_ = 10;
+    int path_smooth_window_ = 1;
+    double terminal_path_yaw_lookback_ = 0.2;
     double goal_xy_tolerance_ = 0.1;
     double goal_yaw_tolerance_ = 0.2;
+    double goal_align_xy_abort_tolerance_ = 0.2;
 };
 
 } // namespace mpc_local_planner

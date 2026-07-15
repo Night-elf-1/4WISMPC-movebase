@@ -16,10 +16,13 @@ MpcLocalPlanner:
   transform_timeout: 0.05 # TF 坐标变换最长等待时间 [s]
   forward_window: 80     # 前向搜索最近点窗口大小
   back_buffer: 10        # 后向搜索缓冲大小
+  path_smooth_window: 1  # 允许 1..9；1 不平滑，偶数值按下一个奇数宽度做对称平均
+  terminal_path_yaw_lookback: 0.20 # 末端切线回看距离 [m]，避免最后一个短栅格连接段主导航向
 
   # 目标到达判据
   goal_xy_tolerance: 0.10
   goal_yaw_tolerance: 0.2
+  goal_align_xy_abort_tolerance: 0.20 # 终点对姿漂移超过该距离时，返回路径跟踪 [m]
 
   # 初始航向对齐：若当前航向与路径起始航向偏差超过阈值，先原地旋转对齐
   align_yaw_threshold: 1.047        # rad, 60 deg, 进入对准阈值

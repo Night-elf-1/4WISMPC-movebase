@@ -48,6 +48,7 @@ add_library(${PROJECT_NAME}
   src/mpc_local_planner.cpp
   src/diffmpc.cpp
   src/control_limits.cpp
+  src/planner_utils.cpp
 )
 
 target_link_libraries(${PROJECT_NAME}
@@ -73,6 +74,14 @@ if(CATKIN_ENABLE_TESTING)
   )
   if(TARGET test_diffmpc_reference)
     target_link_libraries(test_diffmpc_reference ${PROJECT_NAME})
+  endif()
+
+  catkin_add_gtest(test_planner_utils
+    test/test_planner_utils.cpp
+    test/test_main.cpp
+  )
+  if(TARGET test_planner_utils)
+    target_link_libraries(test_planner_utils ${PROJECT_NAME})
   endif()
 endif()
 
