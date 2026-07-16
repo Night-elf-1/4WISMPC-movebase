@@ -13,6 +13,9 @@ MpcLocalPlanner:
   max_wheel_acceleration: 1.0   # 单轮最大线加速度 [m/s^2]
   max_steering_angle: 0.8727    # 最大转向角 [rad], 约 50 deg
   max_steering_rate: 0.5        # 最大转向角速度 [rad/s]
+  curvature_speed_gain: 3.0     # 曲率限速增益，越大弯道参考速度越低
+  reference_max_acceleration: 0.5 # 参考速度沿路径的最大加速度 [m/s^2]
+  reference_max_deceleration: 0.8 # 参考速度沿路径的最大减速度 [m/s^2]
   transform_timeout: 0.05 # TF 坐标变换最长等待时间 [s]
   forward_window: 80     # 前向搜索最近点窗口大小
   back_buffer: 10        # 后向搜索缓冲大小

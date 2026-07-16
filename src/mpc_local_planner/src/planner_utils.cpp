@@ -151,6 +151,113 @@ std::vector<double> movingAverage(const std::vector<double>& data, int window)
     return smoothed;
 }
 
+std::vector<double> calculatePathCurvatures(const std::vector<double>& path_x,
+                                            const std::vector<double>& path_y,
+                                            const std::vector<double>& path_yaw)
+{
+    constexpr double kMinArcLength = 1e-6;
+    const size_t point_count = std::min({path_x.size(), path_y.size(), path_yaw.size()});
+    std::vector<double> curvature(point_count, 0.0);
+    if (point_count < 2)
+    {
+        return curvature;
+    }
+
+    auto segmentLength = [&](size_t first, size_t second) {
+        return std::hypot(path_x[second] - path_x[first],
+                          path_y[second] - path_y[first]);
+    };
+    auto yawDifference = [&](size_t first, size_t second) {
+        const double difference = path_yaw[second] - path_yaw[first];
+        return std::atan2(std::sin(difference), std::cos(difference));
+    };
+
+    if (point_count == 2)
+    {
+        const double arc_length = segmentLength(0, 1);
+        if (std::isfinite(arc_length) && arc_length > kMinArcLength)
+        {
+            const double value = yawDifference(0, 1) / arc_length;
+            if (std::isfinite(value))
+            {
+                curvature[0] = value;
+                curvature[1] = value;
+            }
+        }
+        return curvature;
+    }
+
+    for (size_t i = 1; i + 1 < point_count; ++i)
+    {
+        const double arc_length = segmentLength(i - 1, i) + segmentLength(i, i + 1);
+        if (!std::isfinite(arc_length) || arc_length <= kMinArcLength)
+        {
+            continue;
+        }
+
+        const double value = yawDifference(i - 1, i + 1) / arc_length;
+        if (std::isfinite(value))
+        {
+            curvature[i] = value;
+        }
+    }
+
+    // A one-sided yaw derivative is much noisier. Extending the nearest
+    // centered estimate also avoids artificial zero-curvature speed spikes.
+    curvature.front() = curvature[1];
+    curvature.back() = curvature[point_count - 2];
+    return curvature;
+}
+
+bool enforceSpeedProfileAccelerationLimits(const std::vector<double>& path_x,
+                                           const std::vector<double>& path_y,
+                                           double max_acceleration,
+                                           double max_deceleration,
+                                           std::vector<double>& speed_profile)
+{
+    if (path_x.size() != path_y.size() || path_x.size() != speed_profile.size() ||
+        !std::isfinite(max_acceleration) || max_acceleration <= 0.0 ||
+        !std::isfinite(max_deceleration) || max_deceleration <= 0.0)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < speed_profile.size(); ++i)
+    {
+        if (!std::isfinite(path_x[i]) || !std::isfinite(path_y[i]) ||
+            !std::isfinite(speed_profile[i]) || speed_profile[i] < 0.0)
+        {
+            return false;
+        }
+    }
+    if (speed_profile.size() < 2)
+    {
+        return true;
+    }
+
+    for (size_t i = 1; i < speed_profile.size(); ++i)
+    {
+        const double distance = std::hypot(path_x[i] - path_x[i - 1],
+                                           path_y[i] - path_y[i - 1]);
+        const double reachable_speed = std::sqrt(
+            speed_profile[i - 1] * speed_profile[i - 1] +
+            2.0 * max_acceleration * distance);
+        speed_profile[i] = std::min(speed_profile[i], reachable_speed);
+    }
+
+    for (size_t i = speed_profile.size(); i-- > 1;)
+    {
+        const double distance = std::hypot(path_x[i] - path_x[i - 1],
+                                           path_y[i] - path_y[i - 1]);
+        const double reachable_speed = std::sqrt(
+            speed_profile[i] * speed_profile[i] +
+            2.0 * max_deceleration * distance);
+        speed_profile[i - 1] = std::min(speed_profile[i - 1], reachable_speed);
+    }
+
+    return true;
+}
+
 double calculateTerminalPathYaw(const std::vector<double>& path_x,
                                 const std::vector<double>& path_y,
                                 double lookback_distance,

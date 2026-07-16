@@ -12,13 +12,63 @@ namespace
 using mpc_local_planner::GoalPose2D;
 using mpc_local_planner::GoalYawMode;
 using mpc_local_planner::canReportGoalReached;
+using mpc_local_planner::calculatePathCurvatures;
 using mpc_local_planner::calculateTerminalPathYaw;
+using mpc_local_planner::enforceSpeedProfileAccelerationLimits;
 using mpc_local_planner::evaluateGoal;
 using mpc_local_planner::parseGoalYawMode;
 using mpc_local_planner::movingAverage;
 using mpc_local_planner::selectGoalYaw;
 using mpc_local_planner::stepTowardZero;
 using mpc_local_planner::tryCalculateTerminalPathYaw;
+
+TEST(PlannerReferenceProfile, CentralCurvatureUsesFullArcLength)
+{
+    constexpr double radius = 2.0;
+    constexpr double angle_step = 0.05;
+    std::vector<double> path_x;
+    std::vector<double> path_y;
+    std::vector<double> path_yaw;
+    for (int i = 0; i < 21; ++i)
+    {
+        const double angle = angle_step * i;
+        path_x.push_back(radius * std::cos(angle));
+        path_y.push_back(radius * std::sin(angle));
+        path_yaw.push_back(angle + M_PI_2);
+    }
+
+    const auto curvature = calculatePathCurvatures(path_x, path_y, path_yaw);
+
+    ASSERT_EQ(curvature.size(), path_x.size());
+    for (size_t i = 1; i + 1 < curvature.size(); ++i)
+    {
+        EXPECT_NEAR(curvature[i], 1.0 / radius, 1e-4) << "index=" << i;
+    }
+}
+
+TEST(PlannerReferenceProfile, SpeedChangesAreSpreadAlongPath)
+{
+    const std::vector<double> path_x{0.0, 0.1, 0.2};
+    const std::vector<double> path_y(path_x.size(), 0.0);
+    std::vector<double> speed{0.8, 0.2, 0.8};
+
+    ASSERT_TRUE(enforceSpeedProfileAccelerationLimits(
+        path_x, path_y, 0.5, 0.5, speed));
+
+    const double adjacent_limit = std::sqrt(0.2 * 0.2 + 2.0 * 0.5 * 0.1);
+    EXPECT_NEAR(speed[0], adjacent_limit, 1e-12);
+    EXPECT_DOUBLE_EQ(speed[1], 0.2);
+    EXPECT_NEAR(speed[2], adjacent_limit, 1e-12);
+}
+
+TEST(PlannerReferenceProfile, RejectsInvalidSpeedProfileLimits)
+{
+    std::vector<double> speed{0.5, 0.5};
+    EXPECT_FALSE(enforceSpeedProfileAccelerationLimits(
+        {0.0}, {0.0}, 0.5, 0.5, speed));
+    EXPECT_FALSE(enforceSpeedProfileAccelerationLimits(
+        {0.0, 0.1}, {0.0, 0.0}, 0.0, 0.5, speed));
+}
 
 TEST(PlannerGoalLogic, ReachedUsesTrueGoalPoseAcrossAllSmoothingWindows)
 {

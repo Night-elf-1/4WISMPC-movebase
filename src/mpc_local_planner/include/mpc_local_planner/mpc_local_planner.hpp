@@ -150,6 +150,9 @@ private:
     double wheel_radius_ = 0.15;
     double max_speed_ = 1.5;
     double target_speed_ = 1.0;
+    double curvature_speed_gain_ = 3.0;
+    double reference_max_acceleration_ = 0.5;
+    double reference_max_deceleration_ = 0.8;
     double transform_timeout_ = 0.05;
     int forward_window_ = 80;
     int back_buffer_ = 10;

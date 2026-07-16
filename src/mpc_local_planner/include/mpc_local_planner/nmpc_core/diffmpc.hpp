@@ -79,7 +79,9 @@ public:
     }
 
     // 计算参考点的速度（与曲率相关，原样保留）
-    std::vector<double> calculateReferenceSpeeds(const std::vector<double>& curvatures, const double& max_speed);
+    std::vector<double> calculateReferenceSpeeds(const std::vector<double>& curvatures,
+                                                 const double& max_speed,
+                                                 double curvature_gain = 3.0);
     // 平缓航向角
     void smooth_yaw(std::vector<double>& cyaw);
     // 计算最近点

@@ -8,12 +8,18 @@
 
 // ===================== 工具函数：保留与线性版本一致的接口 =====================
 
-std::vector<double> diffMpcController::calculateReferenceSpeeds(const std::vector<double>& curvatures, const double& max_speed) {
+std::vector<double> diffMpcController::calculateReferenceSpeeds(
+    const std::vector<double>& curvatures,
+    const double& max_speed,
+    double curvature_gain) {
     std::vector<double> referenceSpeeds;
     referenceSpeeds.reserve(curvatures.size()); 
+    const double gain = std::isfinite(curvature_gain) && curvature_gain >= 0.0
+                            ? curvature_gain
+                            : 3.0;
     for (double k : curvatures) {
         // 用倒数曲线根据曲率限速
-        double speed = max_speed / (1.0 + 3.0 * std::fabs(k));
+        double speed = max_speed / (1.0 + gain * std::fabs(k));
         // speed 必然 <= max_speed，因此只需限制下限
         speed = std::max(0.05, speed); 
         referenceSpeeds.push_back(speed);

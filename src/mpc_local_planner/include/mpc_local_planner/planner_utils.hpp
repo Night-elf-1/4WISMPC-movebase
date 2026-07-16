@@ -64,6 +64,16 @@ GoalYawSelection selectGoalYaw(GoalYawMode mode,
 
 std::vector<double> movingAverage(const std::vector<double>& data, int window);
 
+std::vector<double> calculatePathCurvatures(const std::vector<double>& path_x,
+                                            const std::vector<double>& path_y,
+                                            const std::vector<double>& path_yaw);
+
+bool enforceSpeedProfileAccelerationLimits(const std::vector<double>& path_x,
+                                           const std::vector<double>& path_y,
+                                           double max_acceleration,
+                                           double max_deceleration,
+                                           std::vector<double>& speed_profile);
+
 bool tryCalculateTerminalPathYaw(const std::vector<double>& path_x,
                                  const std::vector<double>& path_y,
                                  double lookback_distance,

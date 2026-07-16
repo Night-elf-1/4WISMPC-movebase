@@ -52,6 +52,9 @@ void MpcLocalPlanner::loadParameters(const ros::NodeHandle& private_nh)
     private_nh.param("max_wheel_acceleration", param_.control_limits.max_wheel_acceleration, 1.0);
     private_nh.param("max_steering_angle", param_.control_limits.max_steering_angle, 0.8726646259971648);
     private_nh.param("max_steering_rate", param_.control_limits.max_steering_rate, 0.5);
+    private_nh.param("curvature_speed_gain", curvature_speed_gain_, 3.0);
+    private_nh.param("reference_max_acceleration", reference_max_acceleration_, 0.5);
+    private_nh.param("reference_max_deceleration", reference_max_deceleration_, 0.8);
     private_nh.param("transform_timeout", transform_timeout_, 0.05);
     private_nh.param("forward_window", forward_window_, 80);
     private_nh.param("back_buffer", back_buffer_, 10);
@@ -84,6 +87,18 @@ void MpcLocalPlanner::loadParameters(const ros::NodeHandle& private_nh)
         target_speed_ = max_speed_;
     }
     target_speed_ = std::min(target_speed_, max_speed_);
+    if (!std::isfinite(curvature_speed_gain_) || curvature_speed_gain_ < 0.0)
+    {
+        curvature_speed_gain_ = 3.0;
+    }
+    if (!std::isfinite(reference_max_acceleration_) || reference_max_acceleration_ <= 0.0)
+    {
+        reference_max_acceleration_ = param_.control_limits.max_wheel_acceleration;
+    }
+    if (!std::isfinite(reference_max_deceleration_) || reference_max_deceleration_ <= 0.0)
+    {
+        reference_max_deceleration_ = param_.control_limits.max_wheel_acceleration;
+    }
 
     if (path_smooth_window_ < 1 || path_smooth_window_ > 9)
     {
@@ -652,6 +667,12 @@ void MpcLocalPlanner::convertPlanToReference(const std::vector<geometry_msgs::Po
     updateReferenceCurvature(curvature_smooth_window);
     updateSpeedProfile(speed_smooth_window);
     applyStopProfile(stop_distance);
+    if (!enforceSpeedProfileAccelerationLimits(
+            r_x_, r_y_, reference_max_acceleration_, reference_max_deceleration_,
+            speed_profile_))
+    {
+        ROS_WARN("MpcLocalPlanner: could not apply reference speed acceleration limits.");
+    }
 }
 
 void MpcLocalPlanner::setReferencePositions(const std::vector<geometry_msgs::PoseStamped>& plan)
@@ -723,36 +744,9 @@ void MpcLocalPlanner::updateReferenceYaw()
 
 void MpcLocalPlanner::updateReferenceCurvature(int smoothing_window)
 {
-    // 计算曲率
-    rcurvature_.resize(r_x_.size(), 0.0);
-    // 计算某一个点的曲率，至少需要知道它的“前一个点”和“后一个点”。因此，路径的第一个点（没有前一个点）
-    // 和最后一个点（没有后一个点）无法直接计算，代码选择直接赋予它们 0.0（即视为直道），然后跳过当前循环
-    for (size_t i = 0; i < r_x_.size(); ++i)
-    {
-        if (i == 0 || i + 1 >= r_x_.size())
-        {
-            rcurvature_[i] = 0.0;
-            continue;
-        }
-        // 计算的是相邻点之间的距离 ds1 是当前点到下一个点的距离    ds0 是前一个点到当前点的距离
-        // ds 是这两段距离的平均值  用这个平均值 ds 来近似代替微分几何中的微元弧长
-        size_t ip1 = i + 1;
-        size_t im1 = i - 1;
-        double dx1 = r_x_[ip1] - r_x_[i];
-        double dy1 = r_y_[ip1] - r_y_[i];
-        double dx0 = r_x_[i] - r_x_[im1];
-        double dy0 = r_y_[i] - r_y_[im1];
-        double ds1 = std::sqrt(dx1 * dx1 + dy1 * dy1);
-        double ds0 = std::sqrt(dx0 * dx0 + dy0 * dy0);
-        double ds = 0.5 * (ds1 + ds0);
-        // 用到了上一轮（updateReferenceYaw）计算出来的航向角 ryaw_
-        double dyaw = ryaw_[ip1] - ryaw_[im1];
-        dyaw = angles::normalize_angle(dyaw);
-        // 曲率公式：kappa = dtheta / ds
-        // 安全保护 (ds > 1e-6)： 如果两个路径点重合（距离极小，接近 0），
-        // 作为分母会导致“除以零”的严重崩溃。因此加上条件判断，如果距离太小，直接把曲率设为 0
-        rcurvature_[i] = (ds > 1e-6) ? (dyaw / ds) : 0.0;
-    }
+    // Central yaw difference spans both neighboring path segments. Using their
+    // average here would double the estimated curvature.
+    rcurvature_ = calculatePathCurvatures(r_x_, r_y_, ryaw_);
     // 平滑曲率，避免速度曲线剧烈抖动
     rcurvature_ = movingAverage(rcurvature_, smoothing_window);
 }
@@ -761,7 +755,8 @@ void MpcLocalPlanner::updateSpeedProfile(int smoothing_window)
 {
     // 计算参考速度，考虑曲率和最大速度约束
     // rcurvature_是上一步中计算出来的曲率，target_speed_是用户在参数中设置的目标速度
-    speed_profile_ = mpc_->calculateReferenceSpeeds(rcurvature_, target_speed_);
+    speed_profile_ = mpc_->calculateReferenceSpeeds(
+        rcurvature_, target_speed_, curvature_speed_gain_);
 
     // 把速度钳制在 [min_speed, max_speed] 范围内
     const double min_speed = 0.15;

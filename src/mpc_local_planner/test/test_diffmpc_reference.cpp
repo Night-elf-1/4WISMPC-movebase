@@ -9,6 +9,16 @@
 namespace
 {
 
+TEST(DiffMpcReference, CurvatureSpeedGainIsConfigurable)
+{
+    diffMpcController controller;
+    const auto speed = controller.calculateReferenceSpeeds({0.0, 0.2}, 0.8, 2.0);
+
+    ASSERT_EQ(speed.size(), 2U);
+    EXPECT_DOUBLE_EQ(speed[0], 0.8);
+    EXPECT_NEAR(speed[1], 0.8 / 1.4, 1e-12);
+}
+
 TEST(DiffMpcReference, InterpolatesUsingActualArcLength)
 {
     diffMpcController controller;
