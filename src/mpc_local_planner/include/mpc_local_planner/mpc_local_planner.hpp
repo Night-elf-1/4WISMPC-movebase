@@ -124,6 +124,7 @@ private:
     // Reference trajectory
     std::vector<double> r_x_, r_y_, ryaw_, rcurvature_, speed_profile_;
     GoalPose2D goal_;
+    bool goal_yaw_from_pose_ = false;
     bool has_goal_ = false;
     std::string plan_frame_;
     bool has_plan_ = false;
@@ -154,6 +155,7 @@ private:
     int back_buffer_ = 10;
     int path_smooth_window_ = 1;
     double terminal_path_yaw_lookback_ = 0.2;
+    GoalYawMode goal_yaw_mode_ = GoalYawMode::AUTO;
     double goal_xy_tolerance_ = 0.1;
     double goal_yaw_tolerance_ = 0.2;
     double goal_align_xy_abort_tolerance_ = 0.2;

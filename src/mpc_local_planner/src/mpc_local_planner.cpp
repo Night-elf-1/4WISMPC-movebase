@@ -57,6 +57,8 @@ void MpcLocalPlanner::loadParameters(const ros::NodeHandle& private_nh)
     private_nh.param("back_buffer", back_buffer_, 10);
     private_nh.param("path_smooth_window", path_smooth_window_, 1);
     private_nh.param("terminal_path_yaw_lookback", terminal_path_yaw_lookback_, 0.2);
+    std::string goal_yaw_mode;
+    private_nh.param<std::string>("goal_yaw_mode", goal_yaw_mode, std::string("auto"));
     private_nh.param("goal_xy_tolerance", goal_xy_tolerance_, 0.10);
     private_nh.param("goal_yaw_tolerance", goal_yaw_tolerance_, 0.05);
     private_nh.param("goal_align_xy_abort_tolerance", goal_align_xy_abort_tolerance_, 0.20);
@@ -93,6 +95,13 @@ void MpcLocalPlanner::loadParameters(const ros::NodeHandle& private_nh)
     if (!std::isfinite(terminal_path_yaw_lookback_) || terminal_path_yaw_lookback_ <= 0.0)
     {
         terminal_path_yaw_lookback_ = 0.2;
+    }
+    if (!parseGoalYawMode(goal_yaw_mode, goal_yaw_mode_))
+    {
+        ROS_WARN("MpcLocalPlanner: unknown goal_yaw_mode='%s'; using 'auto'. "
+                 "Valid values are auto, pose_orientation, and path_tangent.",
+                 goal_yaw_mode.c_str());
+        goal_yaw_mode_ = GoalYawMode::AUTO;
     }
     if (!std::isfinite(goal_xy_tolerance_) || goal_xy_tolerance_ <= 0.0)
     {
@@ -152,46 +161,126 @@ bool MpcLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& pla
         ROS_WARN("Received empty plan.");
         return false;
     }
-    // 将全局规划器的路径统一转换到同一个坐标系下，方便后续计算
+    // 将全局规划器的路径统一转换到同一个坐标系下，方便后续计算 确定路径坐标系
     const std::string plan_frame = plan.front().header.frame_id;
     if (plan_frame.empty())
     {
         ROS_ERROR("MpcLocalPlanner received a plan without a frame_id.");
         return false;
     }
+
+    const auto& original_goal_orientation = plan.back().pose.orientation;
+    const bool goal_orientation_components_finite =
+        std::isfinite(original_goal_orientation.x) &&
+        std::isfinite(original_goal_orientation.y) &&
+        std::isfinite(original_goal_orientation.z) &&
+        std::isfinite(original_goal_orientation.w);
+    const double original_goal_orientation_norm_squared =
+        original_goal_orientation.x * original_goal_orientation.x +
+        original_goal_orientation.y * original_goal_orientation.y +
+        original_goal_orientation.z * original_goal_orientation.z +
+        original_goal_orientation.w * original_goal_orientation.w;
+    if (!goal_orientation_components_finite ||
+        !std::isfinite(original_goal_orientation_norm_squared))
+    {
+        ROS_WARN("MpcLocalPlanner received an invalid goal orientation; it will be "
+                 "treated as unavailable according to goal_yaw_mode=%s.",
+                 goalYawModeName(goal_yaw_mode_));
+    }
+    // geometry_msgs 默认构造出的四元数全为 0，可将它明确识别为“未提供方向”。
+    const bool goal_orientation_provided =
+        goal_orientation_components_finite &&
+        std::isfinite(original_goal_orientation_norm_squared) &&
+        original_goal_orientation_norm_squared > 1e-12;
+
+    // 统一所有路径点的坐标系
     std::vector<geometry_msgs::PoseStamped> normalized_plan;
     if (!normalizePlanFrames(plan, plan_frame, normalized_plan))
     {
         return false;
     }
+
+    // 读取真实目标点
     const auto& normalized_goal = normalized_plan.back().pose;
-    if (!std::isfinite(normalized_goal.position.x) ||
-        !std::isfinite(normalized_goal.position.y))
+    std::vector<double> terminal_path_x;
+    std::vector<double> terminal_path_y;
+    terminal_path_x.reserve(normalized_plan.size());
+    terminal_path_y.reserve(normalized_plan.size());
+    for (size_t i = 0; i < normalized_plan.size(); ++i)
     {
-        ROS_ERROR("MpcLocalPlanner received a plan with a non-finite goal position.");
+        const double x = normalized_plan[i].pose.position.x;
+        const double y = normalized_plan[i].pose.position.y;
+        if (!std::isfinite(x) || !std::isfinite(y))
+        {
+            ROS_ERROR("MpcLocalPlanner received a non-finite position at plan pose %zu.", i);
+            return false;
+        }
+        terminal_path_x.push_back(x);
+        terminal_path_y.push_back(y);
+    }
+
+    // 与实际 MPC 参考路径使用相同的平滑规则，再计算最终停车方向。
+    std::vector<double> smoothed_terminal_x =
+        movingAverage(terminal_path_x, path_smooth_window_);
+    std::vector<double> smoothed_terminal_y =
+        movingAverage(terminal_path_y, path_smooth_window_);
+    smoothed_terminal_x.front() = terminal_path_x.front();
+    smoothed_terminal_x.back() = terminal_path_x.back();
+    smoothed_terminal_y.front() = terminal_path_y.front();
+    smoothed_terminal_y.back() = terminal_path_y.back();
+
+    double terminal_path_yaw = 0.0;
+    const bool terminal_path_yaw_valid = tryCalculateTerminalPathYaw(
+        smoothed_terminal_x, smoothed_terminal_y,
+        terminal_path_yaw_lookback_, terminal_path_yaw);
+
+    double requested_goal_yaw = std::numeric_limits<double>::quiet_NaN();
+    if (goal_orientation_provided)
+    {
+        requested_goal_yaw = getYaw(normalized_goal.orientation);
+    }
+    if (goal_orientation_provided && !std::isfinite(requested_goal_yaw))
+    {
+        ROS_WARN("MpcLocalPlanner could not extract a valid yaw from the transformed "
+                 "goal orientation; it will be treated as unavailable.");
+    }
+
+    const GoalYawSelection selected_goal_yaw = selectGoalYaw(
+        goal_yaw_mode_, requested_goal_yaw,
+        terminal_path_yaw_valid, terminal_path_yaw);
+    if (!selected_goal_yaw.valid)
+    {
+        if (goal_yaw_mode_ == GoalYawMode::POSE_ORIENTATION)
+        {
+            ROS_ERROR("MpcLocalPlanner: goal_yaw_mode=pose_orientation, but the final "
+                      "path pose has no valid orientation.");
+        }
+        else if (goal_yaw_mode_ == GoalYawMode::PATH_TANGENT)
+        {
+            ROS_ERROR("MpcLocalPlanner: goal_yaw_mode=path_tangent requires at least "
+                      "two distinct finite XY path points.");
+        }
+        else
+        {
+            ROS_ERROR("MpcLocalPlanner cannot determine the goal yaw: the final pose has "
+                      "no valid orientation and the path has no terminal direction.");
+        }
         return false;
     }
-    const double requested_goal_yaw = getYaw(normalized_goal.orientation);
 
     std::lock_guard<std::mutex> lock(mutex_);
+    // 保存旧目标和旧状态
     const GoalPose2D previous_goal = goal_;
     const bool had_goal = has_goal_;
     const State previous_state = state_;
     const std::string previous_plan_frame = plan_frame_;
     plan_frame_ = plan_frame;   // 将路径坐标系存储为成员变量
     convertPlanToReference(normalized_plan);   // 把统一坐标系下的 ROS 路径转成 MPC 参考轨迹
+    // 独立保存目标姿态
     goal_.x = normalized_goal.position.x;
     goal_.y = normalized_goal.position.y;
-    if (std::isfinite(requested_goal_yaw))
-    {
-        goal_.yaw = requested_goal_yaw;
-    }
-    else
-    {
-        goal_.yaw = ryaw_.empty() ? 0.0 : angles::normalize_angle(ryaw_.back());
-        ROS_WARN("MpcLocalPlanner: goal orientation is invalid; using terminal path yaw %.3f.",
-                 goal_.yaw);
-    }
+    goal_.yaw = angles::normalize_angle(selected_goal_yaw.yaw);
+    goal_yaw_from_pose_ = selected_goal_yaw.used_pose_orientation;
     has_goal_ = true;
     const double same_goal_xy_tolerance =
         std::max(1e-4, std::min(0.01, 0.1 * goal_xy_tolerance_));
@@ -220,10 +309,16 @@ bool MpcLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& pla
         mpc_->U = last_control_command_;
     }
 
+    const double logged_terminal_path_yaw = terminal_path_yaw_valid
+        ? terminal_path_yaw
+        : std::numeric_limits<double>::quiet_NaN();
     ROS_INFO("MpcLocalPlanner received plan with %zu points in frame '%s' "
-             "(smooth_window=%d, goal_yaw=%.3f, terminal_path_yaw=%.3f).",
-             plan.size(), plan_frame_.c_str(), path_smooth_window_, goal_.yaw,
-             ryaw_.empty() ? 0.0 : angles::normalize_angle(ryaw_.back()));
+             "(smooth_window=%d, goal_yaw_mode=%s, goal_yaw_source=%s, "
+             "goal_yaw=%.3f, terminal_path_yaw=%.3f).",
+             plan.size(), plan_frame_.c_str(), path_smooth_window_,
+             goalYawModeName(goal_yaw_mode_),
+             goal_yaw_from_pose_ ? "pose_orientation" : "path_tangent",
+             goal_.yaw, logged_terminal_path_yaw);
     return true;
 }
 
@@ -316,7 +411,7 @@ bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     {
         return false;
     }
-    std::cout << "v1 = " << U_solve(0) << std::endl;
+    // std::cout << "v1 = " << U_solve(0) << std::endl;
     // Publish wheel commands
     if (!publishWheelCommands(U_solve))
     {
@@ -406,17 +501,16 @@ double MpcLocalPlanner::getYaw(const geometry_msgs::Quaternion& q) const
 
 bool MpcLocalPlanner::getRobotPose(Eigen::Vector3d& state) const
 {
-    geometry_msgs::PoseStamped robot_pose;
-    if (!costmap_ros_->getRobotPose(robot_pose))
+    geometry_msgs::PoseStamped robot_pose;  // 声明一个带坐标系和时间戳的位姿
+    if (!costmap_ros_->getRobotPose(robot_pose))    // 如果 costmap 获取失败，回退到最近一帧 /odom
     {
-        // Fallback to odometry if costmap pose is unavailable
         if (!has_odom_)
         {
             return false;
         }
         robot_pose = latest_odom_pose_;
     }
-
+    // 将机器人位姿转换到全局路径坐标
     geometry_msgs::PoseStamped plan_pose;
     if (!transformPoseToPlanFrame(robot_pose, plan_pose))
     {
@@ -495,6 +589,17 @@ bool MpcLocalPlanner::normalizePlanFrames(
         {
             ROS_ERROR("MpcLocalPlanner plan pose %zu has no frame_id.", i);
             return false;
+        }
+
+        // TF2 cannot transform a pose containing a zero/invalid quaternion.
+        // Orientation is ignored for path samples, and setPlan() separately
+        // remembers whether the original terminal pose supplied a valid yaw.
+        if (!std::isfinite(getYaw(source_pose.pose.orientation)))
+        {
+            source_pose.pose.orientation.x = 0.0;
+            source_pose.pose.orientation.y = 0.0;
+            source_pose.pose.orientation.z = 0.0;
+            source_pose.pose.orientation.w = 1.0;
         }
 
         if (source_pose.header.frame_id == plan_frame)

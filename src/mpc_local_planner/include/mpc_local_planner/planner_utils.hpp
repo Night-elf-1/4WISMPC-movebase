@@ -1,6 +1,7 @@
 #ifndef MPC_LOCAL_PLANNER_PLANNER_UTILS_HPP
 #define MPC_LOCAL_PLANNER_PLANNER_UTILS_HPP
 
+#include <string>
 #include <vector>
 
 namespace mpc_local_planner
@@ -27,6 +28,20 @@ struct GoalEvaluation
     }
 };
 
+enum class GoalYawMode
+{
+    AUTO,
+    POSE_ORIENTATION,
+    PATH_TANGENT
+};
+
+struct GoalYawSelection
+{
+    double yaw = 0.0;
+    bool valid = false;
+    bool used_pose_orientation = false;
+};
+
 GoalEvaluation evaluateGoal(double current_x,
                             double current_y,
                             double current_yaw,
@@ -38,7 +53,21 @@ bool canReportGoalReached(const GoalEvaluation& goal, bool steering_recentered);
 
 double stepTowardZero(double value, double max_step);
 
+bool parseGoalYawMode(const std::string& value, GoalYawMode& mode);
+
+const char* goalYawModeName(GoalYawMode mode);
+
+GoalYawSelection selectGoalYaw(GoalYawMode mode,
+                               double pose_yaw,
+                               bool terminal_path_yaw_valid,
+                               double terminal_path_yaw);
+
 std::vector<double> movingAverage(const std::vector<double>& data, int window);
+
+bool tryCalculateTerminalPathYaw(const std::vector<double>& path_x,
+                                 const std::vector<double>& path_y,
+                                 double lookback_distance,
+                                 double& yaw);
 
 double calculateTerminalPathYaw(const std::vector<double>& path_x,
                                 const std::vector<double>& path_y,

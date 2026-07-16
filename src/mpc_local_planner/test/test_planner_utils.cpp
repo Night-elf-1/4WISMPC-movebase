@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include "mpc_local_planner/planner_utils.hpp"
@@ -9,11 +10,15 @@ namespace
 {
 
 using mpc_local_planner::GoalPose2D;
+using mpc_local_planner::GoalYawMode;
 using mpc_local_planner::canReportGoalReached;
 using mpc_local_planner::calculateTerminalPathYaw;
 using mpc_local_planner::evaluateGoal;
+using mpc_local_planner::parseGoalYawMode;
 using mpc_local_planner::movingAverage;
+using mpc_local_planner::selectGoalYaw;
 using mpc_local_planner::stepTowardZero;
+using mpc_local_planner::tryCalculateTerminalPathYaw;
 
 TEST(PlannerGoalLogic, ReachedUsesTrueGoalPoseAcrossAllSmoothingWindows)
 {
@@ -113,6 +118,87 @@ TEST(PlannerGoalLogic, SteeringRecenterIsBoundedAndEndsAtExactZero)
     {
         EXPECT_DOUBLE_EQ(angle, 0.0);
     }
+}
+
+TEST(PlannerGoalYaw, AutoUsesValidPoseOrientation)
+{
+    const auto selected = selectGoalYaw(GoalYawMode::AUTO, M_PI_2, true, -0.4);
+
+    ASSERT_TRUE(selected.valid);
+    EXPECT_DOUBLE_EQ(selected.yaw, M_PI_2);
+    EXPECT_TRUE(selected.used_pose_orientation);
+}
+
+TEST(PlannerGoalYaw, AutoUsesPathTangentWhenOrientationIsMissing)
+{
+    const auto selected = selectGoalYaw(
+        GoalYawMode::AUTO, std::numeric_limits<double>::quiet_NaN(), true, 0.7);
+
+    ASSERT_TRUE(selected.valid);
+    EXPECT_DOUBLE_EQ(selected.yaw, 0.7);
+    EXPECT_FALSE(selected.used_pose_orientation);
+
+    const auto invalid_orientation = selectGoalYaw(
+        GoalYawMode::AUTO, std::numeric_limits<double>::infinity(), true, -0.3);
+    ASSERT_TRUE(invalid_orientation.valid);
+    EXPECT_DOUBLE_EQ(invalid_orientation.yaw, -0.3);
+    EXPECT_FALSE(invalid_orientation.used_pose_orientation);
+}
+
+TEST(PlannerGoalYaw, PathTangentOverridesValidIdentityOrientation)
+{
+    const auto selected = selectGoalYaw(GoalYawMode::PATH_TANGENT, 0.0, true, -0.8);
+
+    ASSERT_TRUE(selected.valid);
+    EXPECT_DOUBLE_EQ(selected.yaw, -0.8);
+    EXPECT_FALSE(selected.used_pose_orientation);
+}
+
+TEST(PlannerGoalYaw, PoseOrientationRejectsMissingOrientation)
+{
+    const auto selected = selectGoalYaw(
+        GoalYawMode::POSE_ORIENTATION,
+        std::numeric_limits<double>::quiet_NaN(), true, 0.7);
+
+    EXPECT_FALSE(selected.valid);
+}
+
+TEST(PlannerGoalYaw, MissingOrientationAndPathDirectionAreRejected)
+{
+    const auto selected = selectGoalYaw(
+        GoalYawMode::AUTO,
+        std::numeric_limits<double>::quiet_NaN(), false, 0.0);
+
+    EXPECT_FALSE(selected.valid);
+}
+
+TEST(PlannerGoalYaw, ParsesSupportedModesAndRejectsUnknownValues)
+{
+    GoalYawMode mode = GoalYawMode::AUTO;
+    EXPECT_TRUE(parseGoalYawMode("AUTO", mode));
+    EXPECT_EQ(mode, GoalYawMode::AUTO);
+    EXPECT_TRUE(parseGoalYawMode("pose", mode));
+    EXPECT_EQ(mode, GoalYawMode::POSE_ORIENTATION);
+    EXPECT_TRUE(parseGoalYawMode("pose_orientation", mode));
+    EXPECT_EQ(mode, GoalYawMode::POSE_ORIENTATION);
+    EXPECT_TRUE(parseGoalYawMode("path", mode));
+    EXPECT_EQ(mode, GoalYawMode::PATH_TANGENT);
+    EXPECT_TRUE(parseGoalYawMode("path_tangent", mode));
+    EXPECT_EQ(mode, GoalYawMode::PATH_TANGENT);
+
+    EXPECT_FALSE(parseGoalYawMode("unknown", mode));
+    EXPECT_EQ(mode, GoalYawMode::PATH_TANGENT);
+}
+
+TEST(PlannerGoalYaw, TerminalTangentRequiresTwoDistinctPoints)
+{
+    double yaw = 1.23;
+    EXPECT_FALSE(tryCalculateTerminalPathYaw({1.0}, {2.0}, 0.2, yaw));
+    EXPECT_DOUBLE_EQ(yaw, 1.23);
+
+    EXPECT_FALSE(tryCalculateTerminalPathYaw(
+        {1.0, 1.0, 1.0}, {2.0, 2.0, 2.0}, 0.2, yaw));
+    EXPECT_DOUBLE_EQ(yaw, 1.23);
 }
 
 } // namespace

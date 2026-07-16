@@ -1,6 +1,7 @@
 #include "mpc_local_planner/planner_utils.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <limits>
 
@@ -57,6 +58,67 @@ double stepTowardZero(double value, double max_step)
     return 0.0;
 }
 
+bool parseGoalYawMode(const std::string& value, GoalYawMode& mode)
+{
+    std::string normalized = value;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char character) {
+                       return static_cast<char>(std::tolower(character));
+                   });
+
+    if (normalized == "auto")
+    {
+        mode = GoalYawMode::AUTO;
+        return true;
+    }
+    if (normalized == "pose" || normalized == "pose_orientation")
+    {
+        mode = GoalYawMode::POSE_ORIENTATION;
+        return true;
+    }
+    if (normalized == "path" || normalized == "path_tangent")
+    {
+        mode = GoalYawMode::PATH_TANGENT;
+        return true;
+    }
+    return false;
+}
+
+const char* goalYawModeName(GoalYawMode mode)
+{
+    switch (mode)
+    {
+        case GoalYawMode::AUTO:
+            return "auto";
+        case GoalYawMode::POSE_ORIENTATION:
+            return "pose_orientation";
+        case GoalYawMode::PATH_TANGENT:
+            return "path_tangent";
+    }
+    return "auto";
+}
+
+GoalYawSelection selectGoalYaw(GoalYawMode mode,
+                               double pose_yaw,
+                               bool terminal_path_yaw_valid,
+                               double terminal_path_yaw)
+{
+    const bool pose_yaw_valid = std::isfinite(pose_yaw);
+    if (mode != GoalYawMode::PATH_TANGENT && pose_yaw_valid)
+    {
+        return GoalYawSelection{pose_yaw, true, true};
+    }
+    if (mode == GoalYawMode::POSE_ORIENTATION)
+    {
+        return GoalYawSelection();
+    }
+    if (terminal_path_yaw_valid && std::isfinite(terminal_path_yaw))
+    {
+        return GoalYawSelection{terminal_path_yaw, true, false};
+    }
+    return GoalYawSelection();
+}
+
 std::vector<double> movingAverage(const std::vector<double>& data, int window)
 {
     std::vector<double> smoothed = data;
@@ -94,12 +156,24 @@ double calculateTerminalPathYaw(const std::vector<double>& path_x,
                                 double lookback_distance,
                                 double fallback_yaw)
 {
+    double yaw = 0.0;
+    if (tryCalculateTerminalPathYaw(path_x, path_y, lookback_distance, yaw))
+    {
+        return yaw;
+    }
+    return std::isfinite(fallback_yaw) ? fallback_yaw : 0.0;
+}
+
+bool tryCalculateTerminalPathYaw(const std::vector<double>& path_x,
+                                 const std::vector<double>& path_y,
+                                 double lookback_distance,
+                                 double& yaw)
+{
     constexpr double kMinChordLength = 1e-6;
     const size_t point_count = std::min(path_x.size(), path_y.size());
-    double candidate = std::isfinite(fallback_yaw) ? fallback_yaw : 0.0;
     if (point_count < 2)
     {
-        return candidate;
+        return false;
     }
 
     const size_t last = point_count - 1;
@@ -107,13 +181,15 @@ double calculateTerminalPathYaw(const std::vector<double>& path_x,
     const double goal_y = path_y[last];
     if (!std::isfinite(goal_x) || !std::isfinite(goal_y))
     {
-        return candidate;
+        return false;
     }
 
     const double required_chord =
         std::isfinite(lookback_distance)
             ? std::max(lookback_distance, kMinChordLength)
             : kMinChordLength;
+    bool found_direction = false;
+    double candidate = 0.0;
     for (size_t index = last; index-- > 0;)
     {
         if (!std::isfinite(path_x[index]) || !std::isfinite(path_y[index]))
@@ -130,12 +206,18 @@ double calculateTerminalPathYaw(const std::vector<double>& path_x,
         }
 
         candidate = std::atan2(dy, dx);
+        found_direction = true;
         if (chord >= required_chord)
         {
             break;
         }
     }
-    return candidate;
+    if (!found_direction)
+    {
+        return false;
+    }
+    yaw = candidate;
+    return true;
 }
 
 } // namespace mpc_local_planner

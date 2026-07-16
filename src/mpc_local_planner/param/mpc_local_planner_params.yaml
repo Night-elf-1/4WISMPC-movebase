@@ -18,6 +18,10 @@ MpcLocalPlanner:
   back_buffer: 10        # 后向搜索缓冲大小
   path_smooth_window: 1  # 允许 1..9；1 不平滑，偶数值按下一个奇数宽度做对称平均
   terminal_path_yaw_lookback: 0.20 # 末端切线回看距离 [m]，避免最后一个短栅格连接段主导航向
+  # auto: 终点四元数有效时使用它，全零（未提供）时使用路径末端方向
+  # pose_orientation: 必须使用终点四元数；path_tangent: 始终使用路径末端方向
+  # 若 XY-only 发布器用 (0,0,0,1) 占位，请配置 path_tangent，因其与真实 yaw=0 无法自动区分
+  goal_yaw_mode: auto
 
   # 目标到达判据
   goal_xy_tolerance: 0.10
