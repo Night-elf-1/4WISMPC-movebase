@@ -12,11 +12,72 @@ namespace
 TEST(DiffMpcReference, CurvatureSpeedGainIsConfigurable)
 {
     diffMpcController controller;
-    const auto speed = controller.calculateReferenceSpeeds({0.0, 0.2}, 0.8, 2.0);
+    const auto speed = controller.calculateReferenceSpeeds({0.0, 0.2, 5.0}, 0.8, 2.0, 0.2);
 
-    ASSERT_EQ(speed.size(), 2U);
+    ASSERT_EQ(speed.size(), 3U);
     EXPECT_DOUBLE_EQ(speed[0], 0.8);
     EXPECT_NEAR(speed[1], 0.8 / 1.4, 1e-12);
+    EXPECT_DOUBLE_EQ(speed[2], 0.2);
+}
+
+TEST(DiffMpcCost, ConfiguredPositionWeightChangesObjective)
+{
+    constexpr size_t n_vars = NMPC_T * 3 + (NMPC_T - 1) * 8;
+    constexpr size_t n_constraints =
+        NMPC_T * 3 + 8 * (NMPC_T - 1) + 5 * (NMPC_T - 1);
+    FG_EVAL_DIFF::ADvector vars(n_vars);
+    FG_EVAL_DIFF::ADvector fg(1 + n_constraints);
+    for (size_t i = 0; i < n_vars; ++i)
+    {
+        vars[i] = 0.0;
+    }
+
+    M_XREF_DIFF reference = M_XREF_DIFF::Zero();
+    reference.row(0).setOnes();
+    MpcCostWeights weights;
+    weights.position = 3.0;
+    weights.yaw = 0.0;
+    weights.speed = 0.0;
+    weights.wheel_speed = 0.0;
+    weights.steering = 0.0;
+    weights.wheel_speed_change = 0.0;
+    weights.steering_change = 0.0;
+    FG_EVAL_DIFF evaluator(
+        reference, Eigen::VectorXd::Zero(NMPC_NU), 0.4615, 0.4, weights);
+
+    evaluator(fg, vars);
+
+    EXPECT_NEAR(CppAD::Value(fg[0]), 3.0 * (NMPC_T - 1), 1e-12);
+}
+
+TEST(DiffMpcCost, WheelAndSteeringWeightsAreIndependent)
+{
+    constexpr size_t n_vars = NMPC_T * 3 + (NMPC_T - 1) * 8;
+    constexpr size_t n_constraints =
+        NMPC_T * 3 + 8 * (NMPC_T - 1) + 5 * (NMPC_T - 1);
+    FG_EVAL_DIFF::ADvector vars(n_vars);
+    FG_EVAL_DIFF::ADvector fg(1 + n_constraints);
+    for (size_t i = 0; i < n_vars; ++i)
+    {
+        vars[i] = 0.0;
+    }
+    vars[v1_start_] = 1.0;
+    vars[d1_start_] = 1.0;
+
+    MpcCostWeights weights;
+    weights.position = 0.0;
+    weights.yaw = 0.0;
+    weights.speed = 0.0;
+    weights.wheel_speed = 2.0;
+    weights.steering = 3.0;
+    weights.wheel_speed_change = 0.0;
+    weights.steering_change = 0.0;
+    FG_EVAL_DIFF evaluator(
+        M_XREF_DIFF::Zero(), Eigen::VectorXd::Zero(NMPC_NU), 0.4615, 0.4, weights);
+
+    evaluator(fg, vars);
+
+    EXPECT_NEAR(CppAD::Value(fg[0]), 5.0, 1e-12);
 }
 
 TEST(DiffMpcReference, InterpolatesUsingActualArcLength)

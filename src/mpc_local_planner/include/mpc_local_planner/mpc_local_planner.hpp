@@ -153,6 +153,12 @@ private:
     double curvature_speed_gain_ = 3.0;
     double reference_max_acceleration_ = 0.5;
     double reference_max_deceleration_ = 0.8;
+    int curvature_smooth_window_ = 5;
+    int speed_smooth_window_ = 5;
+    double min_reference_speed_ = 0.15;
+    double stop_distance_ = 0.4;
+    double mpc_warm_start_reset_distance_ = 1.0;
+    double nearest_global_search_distance_ = 5.0;
     double transform_timeout_ = 0.05;
     int forward_window_ = 80;
     int back_buffer_ = 10;

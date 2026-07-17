@@ -11,17 +11,21 @@
 std::vector<double> diffMpcController::calculateReferenceSpeeds(
     const std::vector<double>& curvatures,
     const double& max_speed,
-    double curvature_gain) {
+    double curvature_gain,
+    double minimum_speed) {
     std::vector<double> referenceSpeeds;
     referenceSpeeds.reserve(curvatures.size()); 
     const double gain = std::isfinite(curvature_gain) && curvature_gain >= 0.0
                             ? curvature_gain
                             : 3.0;
+    const double speed_floor = std::isfinite(minimum_speed) && minimum_speed >= 0.0
+                                   ? std::min(minimum_speed, max_speed)
+                                   : 0.05;
     for (double k : curvatures) {
         // 用倒数曲线根据曲率限速
         double speed = max_speed / (1.0 + gain * std::fabs(k));
         // speed 必然 <= max_speed，因此只需限制下限
-        speed = std::max(0.05, speed); 
+        speed = std::max(speed_floor, speed);
         referenceSpeeds.push_back(speed);
     }
     return referenceSpeeds;
@@ -144,8 +148,12 @@ M_XREF_DIFF diffMpcController::build_horizon_reference(int min_index,
 
 // ===================== NMPC 代价 / 约束函数 =====================
 
-FG_EVAL_DIFF::FG_EVAL_DIFF(const M_XREF_DIFF &trajRef, const Eigen::VectorXd &uPrev, double L_, double W_)
-    : traj_ref(trajRef), U_prev(uPrev), L(L_), W(W_) {}
+FG_EVAL_DIFF::FG_EVAL_DIFF(const M_XREF_DIFF &trajRef,
+                           const Eigen::VectorXd &uPrev,
+                           double L_,
+                           double W_,
+                           const MpcCostWeights& weights_)
+    : traj_ref(trajRef), U_prev(uPrev), L(L_), W(W_), weights(weights_) {}
 
 void FG_EVAL_DIFF::operator()(FG_EVAL_DIFF::ADvector &fg, const FG_EVAL_DIFF::ADvector &vars) {
     fg[0] = 0;  // 目标函数初始化   每次 IPOPT 调用该函数，都要从零重新累计目标函数。fg[0] 是 AD<double>，赋值 0 会自动转换成 AD 常量。
@@ -155,15 +163,16 @@ void FG_EVAL_DIFF::operator()(FG_EVAL_DIFF::ADvector &fg, const FG_EVAL_DIFF::AD
     double yw[4] = {W, W, -W, -W};
     double denom = 4.0 * (L * L + W * W);   // 分母：四个轮子到车辆中心距离平方之和
 
-    const double w_pos = 1.0;     // 位置跟踪权重       1.0
-    const double w_yaw = 2.0;     // 航向跟踪权重   0.5
-    const double w_v   = 2.0;     // 速度跟踪权重   2.0
-    const double w_u   = 0.01;    // 控制量大小权重
-    const double w_du  = 0.5;     // 控制量变化率权重   0.5 w_du 越大 → 控制更平滑，但响应可能更慢 w_du 越小 → 响应更快，但控制变化可能更剧烈
+    const double w_pos = weights.position;
+    const double w_yaw = weights.yaw;
+    const double w_v   = weights.speed;
+    const double w_wheel_speed = weights.wheel_speed;
+    const double w_steering = weights.steering;
+    const double w_wheel_speed_change = weights.wheel_speed_change;
+    const double w_steering_change = weights.steering_change;
 
     // ---- 控制量代价（大小 + 相邻步变化率 + 速度跟踪） ----
-    // 每个控制步的代价可概括为 J_control =0.01 × Σ(v_j² + d_j²)+ 2.0  × (v_ref - v_avg)²+ 0.5  × ||u_i - u_previous||²
-    // 第一项抑制过大的轮速和转角；第二项跟踪参考速度；第三项让控制变化更平滑
+    // 控制代价分别约束轮速、舵角、参考速度和相邻控制变化。
     for (int i = 0; i < NMPC_T - 1; i++) {
         AD<double> v1 = vars[v1_start_ + i];
         AD<double> v2 = vars[v2_start_ + i];
@@ -173,10 +182,12 @@ void FG_EVAL_DIFF::operator()(FG_EVAL_DIFF::ADvector &fg, const FG_EVAL_DIFF::AD
         AD<double> d2 = vars[d2_start_ + i];
         AD<double> d3 = vars[d3_start_ + i];
         AD<double> d4 = vars[d4_start_ + i];
-        // 惩罚过大的轮速 fg[0] += w_u × (v1² + v2² + v3² + v4²)
-        fg[0] += w_u * (CppAD::pow(v1, 2) + CppAD::pow(v2, 2) + CppAD::pow(v3, 2) + CppAD::pow(v4, 2));
-        // 惩罚过大的转角 fg[0] += w_u × (d1² + d2² + d3² + d4²) 让优化器倾向于使用较小转角，也就是倾向于让轮子朝向车体前方
-        fg[0] += w_u * (CppAD::pow(d1, 2) + CppAD::pow(d2, 2) + CppAD::pow(d3, 2) + CppAD::pow(d4, 2));
+        // 惩罚过大的轮速。
+        fg[0] += w_wheel_speed * (CppAD::pow(v1, 2) + CppAD::pow(v2, 2) +
+                                  CppAD::pow(v3, 2) + CppAD::pow(v4, 2));
+        // 惩罚过大的转角，让优化器倾向于让轮子朝向车体前方。
+        fg[0] += w_steering * (CppAD::pow(d1, 2) + CppAD::pow(d2, 2) +
+                               CppAD::pow(d3, 2) + CppAD::pow(d4, 2));
         // v_avg 是四个有符号轮速标量的平均值，不是严格的车体纵向速度
         AD<double> v_avg = 0.25 * (v1 + v2 + v3 + v4);
         // 参考速度跟踪代价 第 i+1 个状态节点的参考速度。之所以使用 i+1，是因为第 i 个控制量负责生成第 i+1 个状态
@@ -194,12 +205,14 @@ void FG_EVAL_DIFF::operator()(FG_EVAL_DIFF::ADvector &fg, const FG_EVAL_DIFF::AD
         AD<double> pd3 = (i == 0) ? AD<double>(U_prev(6)) : vars[d3_start_ + i - 1];
         AD<double> pd4 = (i == 0) ? AD<double>(U_prev(7)) : vars[d4_start_ + i - 1];
         // 处理四个轮子的速度变化 v1～v4当前预测步的四轮速度 pv1～pv4用于比较的上一组四轮速度
-        fg[0] += w_du * (CppAD::pow(v1 - pv1, 2) + CppAD::pow(v2 - pv2, 2) +
-                          CppAD::pow(v3 - pv3, 2) + CppAD::pow(v4 - pv4, 2));
+        fg[0] += w_wheel_speed_change *
+                 (CppAD::pow(v1 - pv1, 2) + CppAD::pow(v2 - pv2, 2) +
+                  CppAD::pow(v3 - pv3, 2) + CppAD::pow(v4 - pv4, 2));
         // 处理四个轮子的转角变化 d1～d4当前预测步的四轮转角 pd1～pd4用于比较的上一组四轮转角
-        fg[0] += w_du * (CppAD::pow(d1 - pd1, 2) + CppAD::pow(d2 - pd2, 2) +
-                          CppAD::pow(d3 - pd3, 2) + CppAD::pow(d4 - pd4, 2));
-        // J_du = w_du × Σ[四轮速度变化² + 四轮转角变化²]
+        fg[0] += w_steering_change *
+                 (CppAD::pow(d1 - pd1, 2) + CppAD::pow(d2 - pd2, 2) +
+                  CppAD::pow(d3 - pd3, 2) + CppAD::pow(d4 - pd4, 2));
+        // 轮速变化和舵角变化使用独立权重，便于匹配实车执行器动态。
     }
 
     // ---- 初始状态约束 ----
@@ -463,13 +476,16 @@ Eigen::VectorXd diffMpcController::mpc_solve(const std::vector<double>& cx,
     // 构造 FG_EVAL_DIFF    创建“目标函数和约束计算器”，还没有开始求解
     // traj_ref：未来 10 个状态节点的参考轨迹，包含 [x, y, yaw, v_ref]  previous_control：上一周期实际下发的 8 维控制量
     // params_.L：车辆中心到前后轮的纵向距离    params_.W：车辆中心到左右轮的横向距离
-    FG_EVAL_DIFF fg_eval(traj_ref, previous_control, params_.L, params_.W);
+    FG_EVAL_DIFF fg_eval(
+        traj_ref, previous_control, params_.L, params_.W, params_.cost_weights);
 
     std::string options;
     options += "Integer print_level  0\n";
     options += "Sparse  true        reverse\n";
-    options += "Integer max_iter      150\n";
-    options += "Numeric max_cpu_time          0.3\n";
+    options += "Integer max_iter      " +
+               std::to_string(params_.solver_max_iterations) + "\n";
+    options += "Numeric max_cpu_time          " +
+               std::to_string(params_.solver_max_cpu_time) + "\n";
 
     CppAD::ipopt::solve_result<Dvector> solution;
     // 调用求解器   Dvector：普通 double 数值向量类型   FG_EVAL_DIFF：目标函数和约束函数类型

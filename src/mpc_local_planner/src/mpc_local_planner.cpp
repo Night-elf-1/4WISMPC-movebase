@@ -20,21 +20,21 @@ void MpcLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap_
         return;
     }
 
-    tf_ = tf;
-    costmap_ros_ = costmap_ros;
+    tf_ = tf;   // 指向 TF2 的缓冲区对象，用于进行坐标变换。它在初始化时被赋值为传入的 tf 参数，以便在后续的路径规划和控制过程中使用 TF2 进行坐标变换操作。
+    costmap_ros_ = costmap_ros; // 用于获取机器人的成本地图信息。它在初始化时被赋值为传入的 costmap_ros 参数，以便在后续的路径规划和控制过程中使用成本地图信息。
 
     // move_base 可能传入完整类名 "mpc_local_planner/MpcLocalPlanner"，
     // 也可能只传入类名 "MpcLocalPlanner"；统一使用类名作为参数命名空间
     std::string planner_name = name;
-    size_t slash_pos = planner_name.find_last_of('/');
-    if (slash_pos != std::string::npos)
+    size_t slash_pos = planner_name.find_last_of('/');  // 查找最后一个斜杠的位置，以便提取类名
+    if (slash_pos != std::string::npos) // 如果找到了斜杠，说明传入的是完整类名
     {
-        planner_name = planner_name.substr(slash_pos + 1);
+        planner_name = planner_name.substr(slash_pos + 1);  // 提取斜杠后的子字符串，即类名
     }
-    ros::NodeHandle private_nh("~" + planner_name);
-    ros::NodeHandle nh;
+    ros::NodeHandle private_nh("~" + planner_name); // 创建一个私有的 ROS 节点句柄，用于加载参数。命名空间为 "~" + planner_name，确保参数在该命名空间下独立管理
+    ros::NodeHandle nh; // 创建一个全局的 ROS 节点句柄，用于与 ROS 系统进行交互，例如订阅话题、发布消息等
 
-    loadParameters(private_nh);
+    loadParameters(private_nh); // 加载参数，使用私有节点句柄 private_nh 从 ROS 参数服务器中获取配置参数，并将其存储在类的成员变量中，以便在路径规划和控制过程中使用
     initializeRosInterfaces(nh);
     initializeMpc();
 
@@ -55,6 +55,23 @@ void MpcLocalPlanner::loadParameters(const ros::NodeHandle& private_nh)
     private_nh.param("curvature_speed_gain", curvature_speed_gain_, 3.0);
     private_nh.param("reference_max_acceleration", reference_max_acceleration_, 0.5);
     private_nh.param("reference_max_deceleration", reference_max_deceleration_, 0.8);
+    private_nh.param("curvature_smooth_window", curvature_smooth_window_, 5);
+    private_nh.param("speed_smooth_window", speed_smooth_window_, 5);
+    private_nh.param("min_reference_speed", min_reference_speed_, 0.15);
+    private_nh.param("stop_distance", stop_distance_, 0.4);
+    private_nh.param("mpc_warm_start_reset_distance", mpc_warm_start_reset_distance_, 1.0);
+    private_nh.param("nearest_global_search_distance", nearest_global_search_distance_, 5.0);
+    private_nh.param("mpc_weight_position", param_.cost_weights.position, 1.0);
+    private_nh.param("mpc_weight_yaw", param_.cost_weights.yaw, 2.0);
+    private_nh.param("mpc_weight_speed", param_.cost_weights.speed, 2.0);
+    private_nh.param("mpc_weight_wheel_speed", param_.cost_weights.wheel_speed, 0.01);
+    private_nh.param("mpc_weight_steering", param_.cost_weights.steering, 0.01);
+    private_nh.param("mpc_weight_wheel_speed_change",
+                     param_.cost_weights.wheel_speed_change, 0.5);
+    private_nh.param("mpc_weight_steering_change",
+                     param_.cost_weights.steering_change, 0.5);
+    private_nh.param("solver_max_iterations", param_.solver_max_iterations, 150);
+    private_nh.param("solver_max_cpu_time", param_.solver_max_cpu_time, 0.08);
     private_nh.param("transform_timeout", transform_timeout_, 0.05);
     private_nh.param("forward_window", forward_window_, 80);
     private_nh.param("back_buffer", back_buffer_, 10);
@@ -63,7 +80,7 @@ void MpcLocalPlanner::loadParameters(const ros::NodeHandle& private_nh)
     std::string goal_yaw_mode;
     private_nh.param<std::string>("goal_yaw_mode", goal_yaw_mode, std::string("auto"));
     private_nh.param("goal_xy_tolerance", goal_xy_tolerance_, 0.10);
-    private_nh.param("goal_yaw_tolerance", goal_yaw_tolerance_, 0.05);
+    private_nh.param("goal_yaw_tolerance", goal_yaw_tolerance_, 0.2);
     private_nh.param("goal_align_xy_abort_tolerance", goal_align_xy_abort_tolerance_, 0.20);
     private_nh.param("align_yaw_threshold", align_yaw_threshold_, M_PI / 3.0);
     private_nh.param("align_yaw_exit_threshold", align_yaw_exit_threshold_, M_PI / 18.0);
@@ -71,7 +88,7 @@ void MpcLocalPlanner::loadParameters(const ros::NodeHandle& private_nh)
     private_nh.param("align_recenter_tolerance", align_recenter_tolerance_, 0.01);
     private_nh.param("align_max_omega", align_max_omega_, 0.5);
     private_nh.param("align_kp", align_kp_, 1.0);
-
+    // target_speed <= max_speed <= max_wheel_speed
     if (!areControlLimitsValid(param_.control_limits))
     {
         ROS_ERROR("MpcLocalPlanner received invalid control limits; using conservative defaults.");
@@ -98,6 +115,78 @@ void MpcLocalPlanner::loadParameters(const ros::NodeHandle& private_nh)
     if (!std::isfinite(reference_max_deceleration_) || reference_max_deceleration_ <= 0.0)
     {
         reference_max_deceleration_ = param_.control_limits.max_wheel_acceleration;
+    }
+    // 检查曲率平滑窗口和速度平滑窗口的有效性，确保它们在合理范围内
+    auto validateSmoothingWindow = [](int& value, int fallback, const char* name) {
+        if (value < 1 || value > 31)
+        {
+            ROS_WARN("MpcLocalPlanner: %s=%d is outside [1, 31]; using %d.",
+                     name, value, fallback);
+            value = fallback;
+        }
+    };
+    validateSmoothingWindow(curvature_smooth_window_, 5, "curvature_smooth_window");
+    validateSmoothingWindow(speed_smooth_window_, 5, "speed_smooth_window");
+    if (!std::isfinite(min_reference_speed_) || min_reference_speed_ < 0.0)
+    {
+        min_reference_speed_ = 0.15;
+    }
+    min_reference_speed_ = std::min(min_reference_speed_, max_speed_);
+    if (!std::isfinite(stop_distance_) || stop_distance_ <= 0.0)
+    {
+        stop_distance_ = 0.4;
+    }
+    if (!std::isfinite(mpc_warm_start_reset_distance_) ||
+        mpc_warm_start_reset_distance_ <= 0.0)
+    {
+        mpc_warm_start_reset_distance_ = 1.0;
+    }
+    if (!std::isfinite(nearest_global_search_distance_) ||
+        nearest_global_search_distance_ <= 0.0)
+    {
+        nearest_global_search_distance_ = 5.0;
+    }
+    auto validateWeight = [](double& value, double fallback, const char* name) {
+        if (!std::isfinite(value) || value < 0.0)
+        {
+            ROS_WARN("MpcLocalPlanner: %s must be finite and non-negative; using %.3f.",
+                     name, fallback);
+            value = fallback;
+        }
+    };
+    validateWeight(param_.cost_weights.position, 1.0, "mpc_weight_position");
+    validateWeight(param_.cost_weights.yaw, 2.0, "mpc_weight_yaw");
+    validateWeight(param_.cost_weights.speed, 2.0, "mpc_weight_speed");
+    validateWeight(param_.cost_weights.wheel_speed, 0.01,
+                   "mpc_weight_wheel_speed");
+    validateWeight(param_.cost_weights.steering, 0.01,
+                   "mpc_weight_steering");
+    validateWeight(param_.cost_weights.wheel_speed_change, 0.5,
+                   "mpc_weight_wheel_speed_change");
+    validateWeight(param_.cost_weights.steering_change, 0.5,
+                   "mpc_weight_steering_change");
+    if (param_.cost_weights.position + param_.cost_weights.yaw +
+            param_.cost_weights.speed <= 0.0)
+    {
+        ROS_WARN("MpcLocalPlanner: at least one tracking weight must be positive; "
+                 "restoring position/yaw/speed defaults.");
+        param_.cost_weights.position = 1.0;
+        param_.cost_weights.yaw = 2.0;
+        param_.cost_weights.speed = 2.0;
+    }
+    if (param_.solver_max_iterations <= 0)
+    {
+        param_.solver_max_iterations = 150;
+    }
+    if (!std::isfinite(param_.solver_max_cpu_time) || param_.solver_max_cpu_time <= 0.0)
+    {
+        param_.solver_max_cpu_time = 0.08;
+    }
+    if (param_.solver_max_cpu_time >= NMPC_DT)
+    {
+        ROS_WARN("MpcLocalPlanner: solver_max_cpu_time=%.3f is not below the %.3f s "
+                 "control period; control deadlines may be missed.",
+                 param_.solver_max_cpu_time, NMPC_DT);
     }
 
     if (path_smooth_window_ < 1 || path_smooth_window_ > 9)
@@ -138,6 +227,45 @@ void MpcLocalPlanner::loadParameters(const ros::NodeHandle& private_nh)
     private_nh.param("L_front", L_front_, 0.4615);
     private_nh.param("L_rear", L_rear_, 0.4725);
     param_.dt = NMPC_DT;
+
+    auto validatePositive = [](double& value, double fallback, const char* name) {
+        if (!std::isfinite(value) || value <= 0.0)
+        {
+            ROS_WARN("MpcLocalPlanner: %s must be finite and positive; using %.4f.",
+                     name, fallback);
+            value = fallback;
+        }
+    };
+    validatePositive(wheel_radius_, 0.15, "wheel_radius");
+    validatePositive(param_.L, 0.4615, "L");
+    validatePositive(param_.W, 0.4, "W");
+    validatePositive(L_front_, 0.4615, "L_front");
+    validatePositive(L_rear_, 0.4725, "L_rear");
+    validatePositive(transform_timeout_, 0.05, "transform_timeout");
+    validatePositive(align_yaw_threshold_, M_PI / 3.0, "align_yaw_threshold");
+    validatePositive(align_yaw_exit_threshold_, M_PI / 18.0,
+                     "align_yaw_exit_threshold");
+    validatePositive(align_recenter_max_step_, 0.05, "align_recenter_max_step");
+    validatePositive(align_recenter_tolerance_, 0.01, "align_recenter_tolerance");
+    validatePositive(align_max_omega_, 0.5, "align_max_omega");
+    validatePositive(align_kp_, 1.0, "align_kp");
+    if (align_yaw_exit_threshold_ >= align_yaw_threshold_)
+    {
+        ROS_WARN("MpcLocalPlanner: align_yaw_exit_threshold must be below "
+                 "align_yaw_threshold; restoring 10/60 degree defaults.");
+        align_yaw_threshold_ = M_PI / 3.0;
+        align_yaw_exit_threshold_ = M_PI / 18.0;
+    }
+    if (forward_window_ <= 0)
+    {
+        ROS_WARN("MpcLocalPlanner: forward_window must be positive; using 80.");
+        forward_window_ = 80;
+    }
+    if (back_buffer_ < 0)
+    {
+        ROS_WARN("MpcLocalPlanner: back_buffer must be non-negative; using 10.");
+        back_buffer_ = 10;
+    }
 }
 
 void MpcLocalPlanner::initializeRosInterfaces(ros::NodeHandle& nh)
@@ -183,7 +311,7 @@ bool MpcLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& pla
         ROS_ERROR("MpcLocalPlanner received a plan without a frame_id.");
         return false;
     }
-
+    // 获取原始终点四元数
     const auto& original_goal_orientation = plan.back().pose.orientation;
     const bool goal_orientation_components_finite =
         std::isfinite(original_goal_orientation.x) &&
@@ -656,17 +784,12 @@ void MpcLocalPlanner::convertPlanToReference(const std::vector<geometry_msgs::Po
     ryaw_.clear();
     rcurvature_.clear();
     speed_profile_.clear();
-    // 计算参考轨迹的平滑路径、航向角、曲率和速度
-    const int speed_smooth_window = 5;
-    const int curvature_smooth_window = 5;
-    const double stop_distance = 0.4;
-
     setReferencePositions(plan);    // 这里传入的 plan 已经是统一坐标系下的 ROS 路径
     smoothReferencePath(path_smooth_window_);
     updateReferenceYaw();
-    updateReferenceCurvature(curvature_smooth_window);
-    updateSpeedProfile(speed_smooth_window);
-    applyStopProfile(stop_distance);
+    updateReferenceCurvature(curvature_smooth_window_);
+    updateSpeedProfile(speed_smooth_window_);
+    applyStopProfile(stop_distance_);
     if (!enforceSpeedProfileAccelerationLimits(
             r_x_, r_y_, reference_max_acceleration_, reference_max_deceleration_,
             speed_profile_))
@@ -756,13 +879,12 @@ void MpcLocalPlanner::updateSpeedProfile(int smoothing_window)
     // 计算参考速度，考虑曲率和最大速度约束
     // rcurvature_是上一步中计算出来的曲率，target_speed_是用户在参数中设置的目标速度
     speed_profile_ = mpc_->calculateReferenceSpeeds(
-        rcurvature_, target_speed_, curvature_speed_gain_);
+        rcurvature_, target_speed_, curvature_speed_gain_, min_reference_speed_);
 
     // 把速度钳制在 [min_speed, max_speed] 范围内
-    const double min_speed = 0.15;
     for (auto& v : speed_profile_)
     {
-        v = std::max(min_speed, std::min(max_speed_, v));
+        v = std::max(min_reference_speed_, std::min(max_speed_, v));
     }
     // 对速度曲线做滑动平均平滑，避免急弯处速度骤降导致 MPC 急刹停住
     // 消除相邻路径点速度变化过大的问题
@@ -820,7 +942,7 @@ std::tuple<int, double> MpcLocalPlanner::calcForwardNearestIndex(double current_
     }
 
     // If forward window cannot find a reasonable point, fall back to global search
-    if (mind > 5.0 && start_idx > 0)
+    if (mind > nearest_global_search_distance_ && start_idx > 0)
     {
         return mpc_->calc_ref_trajectory(current_x, current_y, r_x_, r_y_);
     }
@@ -1245,7 +1367,7 @@ bool MpcLocalPlanner::stepSteeringToward(const Eigen::Vector4d& target, Eigen::V
 
 void MpcLocalPlanner::resetControlToReference(int min_index, double min_e)
 {
-    if (min_e <= 1.0)
+    if (min_e <= mpc_warm_start_reset_distance_)
     {
         return;
     }

@@ -25,11 +25,24 @@ using CppAD::AD;
 #define NMPC_T 10         // 预测步长（horizon）
 #define NMPC_DT 0.1       // 采样时间
 
+struct MpcCostWeights {
+    double position = 1.0;
+    double yaw = 2.0;
+    double speed = 2.0;
+    double wheel_speed = 0.01;
+    double steering = 0.01;
+    double wheel_speed_change = 0.5;
+    double steering_change = 0.5;
+};
+
 struct parameters {
     double L = 0.4615;       // 车辆中心到前后轴的距离 (Half wheelbase)，与 smart.xacro 中 front_tyre_x 一致
     double W = 0.4;          // 车辆中心到左右轮的距离 (Half track width)
     double dt = NMPC_DT;
     mpc_local_planner::ControlLimits control_limits;
+    MpcCostWeights cost_weights;
+    int solver_max_iterations = 150;
+    double solver_max_cpu_time = 0.08;
 };
 
 // 参考轨迹矩阵：行 0=x,1=y,2=yaw,3=v_ref（参考速度），列为预测时域上的各时刻参考点
@@ -56,8 +69,13 @@ public:
     M_XREF_DIFF traj_ref;     // 参考轨迹 [x; y; yaw; v_ref] x T
     Eigen::VectorXd U_prev;   // 上一时刻实际控制量(8维)，用于控制量平滑代价
     double L, W;
+    MpcCostWeights weights;
     // 构造函数声明
-    FG_EVAL_DIFF(const M_XREF_DIFF &trajRef, const Eigen::VectorXd &uPrev, double L_, double W_);
+    FG_EVAL_DIFF(const M_XREF_DIFF &trajRef,
+                 const Eigen::VectorXd &uPrev,
+                 double L_,
+                 double W_,
+                 const MpcCostWeights& weights_ = MpcCostWeights());
 
     typedef CPPAD_TESTVECTOR(AD<double>) ADvector;
     // 这是函数调用运算符重载。它让一个 FG_EVAL_DIFF 对象可以像函数一样调用
@@ -81,7 +99,8 @@ public:
     // 计算参考点的速度（与曲率相关，原样保留）
     std::vector<double> calculateReferenceSpeeds(const std::vector<double>& curvatures,
                                                  const double& max_speed,
-                                                 double curvature_gain = 3.0);
+                                                 double curvature_gain = 3.0,
+                                                 double minimum_speed = 0.05);
     // 平缓航向角
     void smooth_yaw(std::vector<double>& cyaw);
     // 计算最近点

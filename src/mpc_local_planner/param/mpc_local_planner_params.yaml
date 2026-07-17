@@ -7,18 +7,24 @@ MpcLocalPlanner:
   W: 0.4                 # 车辆中心到左右轮距离 [m]
 
   # 参考速度/轨迹参数
-  max_speed: 0.8         # 最大允许速度 [m/s]
-  target_speed: 0.8      # 目标巡航速度 [m/s]
-  max_wheel_speed: 0.8          # 单轮最大线速度 [m/s]
-  max_wheel_acceleration: 1.0   # 单轮最大线加速度 [m/s^2]
+  max_speed: 1.0         # 最大允许速度 [m/s]
+  target_speed: 1.0      # 目标巡航速度 [m/s]
+  max_wheel_speed: 1.0          # 单轮最大线速度 [m/s]
+  max_wheel_acceleration: 0.5   # 单轮最大线加速度 [m/s^2]  1.0
   max_steering_angle: 0.8727    # 最大转向角 [rad], 约 50 deg
   max_steering_rate: 0.5        # 最大转向角速度 [rad/s]
   curvature_speed_gain: 3.0     # 曲率限速增益，越大弯道参考速度越低
   reference_max_acceleration: 0.5 # 参考速度沿路径的最大加速度 [m/s^2]
   reference_max_deceleration: 0.8 # 参考速度沿路径的最大减速度 [m/s^2]
+  curvature_smooth_window: 5    # 曲率平滑点数，允许 1..31；偶数会扩展为下一奇数
+  speed_smooth_window: 5        # 速度平滑点数，允许 1..31；过大将提前大范围降速
+  min_reference_speed: 0.3     # 非终点区域最低参考速度 [m/s] 0.15
+  stop_distance: 1.0            # 终点减速距离 [m]  0.4
   transform_timeout: 0.05 # TF 坐标变换最长等待时间 [s]
   forward_window: 80     # 前向搜索最近点窗口大小
   back_buffer: 10        # 后向搜索缓冲大小
+  mpc_warm_start_reset_distance: 1.0 # 偏离路径超过此距离时按参考曲率重建求解初值 [m]
+  nearest_global_search_distance: 5.0 # 局部窗口找不到合理近点时启用全路径搜索 [m]
   path_smooth_window: 1  # 允许 1..9；1 不平滑，偶数值按下一个奇数宽度做对称平均
   terminal_path_yaw_lookback: 0.20 # 末端切线回看距离 [m]，避免最后一个短栅格连接段主导航向
   # auto: 终点四元数有效时使用它，全零（未提供）时使用路径末端方向
@@ -38,3 +44,16 @@ MpcLocalPlanner:
   align_recenter_tolerance: 0.01    # rad, 转角回正完成判据
   align_max_omega: 0.5         # rad/s, 原地旋转最大角速度
   align_kp: 1.0                # 旋转控制比例增益
+
+  # NMPC 代价权重。先完成车辆标定，再小幅调整；不要同时大范围修改多个权重
+  mpc_weight_position: 1.0       # XY 跟踪误差权重
+  mpc_weight_yaw: 2.0            # 航向误差权重；增大后更重视车身朝向
+  mpc_weight_speed: 2.0          # 参考速度跟踪权重
+  mpc_weight_wheel_speed: 0.01   # 轮速绝对值权重
+  mpc_weight_steering: 0.01      # 舵角绝对值权重；增大后更不倾向蟹行/大舵角
+  mpc_weight_wheel_speed_change: 0.5 # 轮速变化权重
+  mpc_weight_steering_change: 0.5    # 舵角变化权重；增大更平顺但响应更慢
+
+  # IPOPT 实时预算。10 Hz 控制周期下 CPU 时间应小于 0.1 s
+  solver_max_iterations: 150
+  solver_max_cpu_time: 0.08
