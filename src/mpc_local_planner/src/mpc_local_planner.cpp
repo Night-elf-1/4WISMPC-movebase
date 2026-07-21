@@ -498,7 +498,7 @@ bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     const GoalEvaluation goal = evaluateCurrentGoal(initial_x);
     if (state_ == State::GOAL_HOLD)
     {
-        if (goal.reached())
+        if (goal.reached()) // 要满足位置和航向都到达目标点，才会进入 GOAL_RECENTERING
         {
             return startGoalRecenter(initial_x, cmd_vel);
         }
@@ -516,13 +516,14 @@ bool MpcLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     {
         return recenterGoalSteering(initial_x, cmd_vel);
     }
+    // 1. 如果目标点已经到达，且航向也到达，则进入 GOAL_HOLD
     if (goal.valid && goal.position_reached)
     {
         if (goal.yaw_reached)
         {
             return startGoalRecenter(initial_x, cmd_vel);
         }
-
+        // 2. 如果目标点已经到达，但航向未到达，则进入 GOAL_ALIGN_STEERING
         state_ = State::GOAL_ALIGN_STEERING;
         ROS_INFO("MpcLocalPlanner: goal position reached; prepare final yaw alignment (error %.2f deg).",
                  goal.yaw_error * 180.0 / M_PI);
@@ -649,6 +650,7 @@ double MpcLocalPlanner::getYaw(const geometry_msgs::Quaternion& q) const
 bool MpcLocalPlanner::getRobotPose(Eigen::Vector3d& state) const
 {
     geometry_msgs::PoseStamped robot_pose;  // 声明一个带坐标系和时间戳的位姿
+    // costmap_ros_->getRobotPose(robot_pose)返回baselink在odom坐标系下的位姿，失败返回false
     if (!costmap_ros_->getRobotPose(robot_pose))    // 如果 costmap 获取失败，回退到最近一帧 /odom
     {
         if (!has_odom_)
@@ -657,7 +659,7 @@ bool MpcLocalPlanner::getRobotPose(Eigen::Vector3d& state) const
         }
         robot_pose = latest_odom_pose_;
     }
-    // 将机器人位姿转换到全局路径坐标
+    // 将机器人odom下的位姿转换到全局路径坐标map下的位姿
     geometry_msgs::PoseStamped plan_pose;
     if (!transformPoseToPlanFrame(robot_pose, plan_pose))
     {
@@ -1097,28 +1099,33 @@ bool MpcLocalPlanner::prepareGoalAlignmentSteering(
     const Eigen::Vector3d& current_state,
     geometry_msgs::Twist& cmd_vel)
 {
+    // 重新计算当前目标状态
     const GoalEvaluation goal = evaluateCurrentGoal(current_state);
     if (!goal.valid)
     {
         publishZeroCommands();
         return false;
     }
-    if (goal.distance > goal_align_xy_abort_tolerance_)
+    // goal_align_xy_abort_tolerance 终点原地对姿时允许的最大漂移距离
+    if (goal.distance > goal_align_xy_abort_tolerance_) // 如果与目标点的横向距离超过了允许的误差范围
     {
+        // 是否存在上一拍的舵角命令，如果有则使用，否则使用零向量
         align_recenter_steer_ = has_last_steer_cmd_
                                     ? last_steer_cmd_
                                     : Eigen::Vector4d::Zero();
-        state_ = State::RECENTERING;
+        state_ = State::RECENTERING;    // 将状态机切换到 RECENTERING，回正转角
         ROS_WARN("MpcLocalPlanner: final alignment drifted %.3f m from goal; return to tracking.",
                  goal.distance);
-        return recenterSteering(cmd_vel);
+        return recenterSteering(cmd_vel);   // 调用 recenterSteering() 函数，执行回正转角的操作
     }
-    if (goal.yaw_reached)
+    if (goal.yaw_reached)   // 如果航向已经到达目标航向
     {
-        if (goal.position_reached)
+        if (goal.position_reached)  // 如果位置也到达目标点，则进入 GOAL_RECENTERING 状态
         {
             return startGoalRecenter(current_state, cmd_vel);
         }
+        // 如果航向满足，但位置已经超出普通位置容差
+        // 说明车辆方向已经正确，但位置还没停在目标范围内。此时回正舵轮，退出终点对姿，重新跟踪路径
         align_recenter_steer_ = has_last_steer_cmd_
                                     ? last_steer_cmd_
                                     : Eigen::Vector4d::Zero();
@@ -1147,12 +1154,12 @@ bool MpcLocalPlanner::prepareGoalAlignmentSteering(
             U.head(4).cwiseAbs().maxCoeff());
         return true;
     }
-
+    // 计算原地旋转所需的舵角
     const Eigen::Vector4d target_steer = makeInPlaceSteeringTarget();
     Eigen::Vector4d stepped_steer;
     const bool requested_steering_ready =
         stepSteeringToward(target_steer, stepped_steer);
-
+    // 构造只包含舵角的控制命令
     Eigen::VectorXd U = Eigen::VectorXd::Zero(NMPC_NU);
     U(4) = stepped_steer(0);
     U(5) = stepped_steer(1);
@@ -1240,12 +1247,16 @@ bool MpcLocalPlanner::startGoalRecenter(
     const Eigen::Vector3d& current_state,
     geometry_msgs::Twist& cmd_vel)
 {
+    // 如果之前下发过舵角命令，就从上一拍命令开始回正   如果没有历史舵角命令，就假定四个舵轮已经处于零位
     align_recenter_steer_ = has_last_steer_cmd_
                                 ? last_steer_cmd_
                                 : Eigen::Vector4d::Zero();
+    // 判断四个轮子的速度命令是否已经停止
     const bool wheel_speeds_stopped =
         !has_last_control_command_ || last_control_command_.size() != NMPC_NU ||
         last_control_command_.head(4).cwiseAbs().maxCoeff() <= 1e-3;
+    // 上面判断条件成立，说明四个轮子已经停止运动，并且舵角也已经接近零位，那么就可以直接进入 GOAL_HOLD 状态，报告到达目标
+    // 第二个判断条件是舵角的绝对值最大值小于等于 1e-6，说明舵角已经非常接近零位
     if (wheel_speeds_stopped &&
         align_recenter_steer_.cwiseAbs().maxCoeff() <= 1e-6)
     {
@@ -1595,7 +1606,7 @@ bool MpcLocalPlanner::applySteeringRecenterStep(
 
 bool MpcLocalPlanner::recenterSteering(geometry_msgs::Twist& cmd_vel)
 {
-    bool done = false;
+    bool done = false;  // 初始化完成标识符
     if (!applySteeringRecenterStep(cmd_vel, done))
     {
         return false;
