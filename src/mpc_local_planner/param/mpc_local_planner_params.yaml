@@ -7,6 +7,7 @@ MpcLocalPlanner:
   W: 0.4                 # 车辆中心到左右轮距离 [m]
 
   # 参考速度/轨迹参数
+  # target_speed <= max_speed <= max_wheel_speed
   max_speed: 1.0         # 最大允许速度 [m/s]
   target_speed: 1.0      # 目标巡航速度 [m/s]
   max_wheel_speed: 1.0          # 单轮最大线速度 [m/s]

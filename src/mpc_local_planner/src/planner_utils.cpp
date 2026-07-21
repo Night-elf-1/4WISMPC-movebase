@@ -271,18 +271,20 @@ double calculateTerminalPathYaw(const std::vector<double>& path_x,
     return std::isfinite(fallback_yaw) ? fallback_yaw : 0.0;
 }
 
+// 估计“路径终点处的行驶方向”   lookback_distance希望从终点回看的直线距离
 bool tryCalculateTerminalPathYaw(const std::vector<double>& path_x,
                                  const std::vector<double>& path_y,
                                  double lookback_distance,
                                  double& yaw)
 {
-    constexpr double kMinChordLength = 1e-6;
+    constexpr double kMinChordLength = 1e-6;    // 直线弦长的最小值，避免除以零或过小的数值
+    // 只使用两个数组都存在的公共部分，避免越界
     const size_t point_count = std::min(path_x.size(), path_y.size());
     if (point_count < 2)
     {
         return false;
     }
-
+    // 把路径最后一个有效索引当作终点。终点坐标如果是 NaN 或无穷大，直接失败
     const size_t last = point_count - 1;
     const double goal_x = path_x[last];
     const double goal_y = path_y[last];
@@ -290,15 +292,17 @@ bool tryCalculateTerminalPathYaw(const std::vector<double>& path_x,
     {
         return false;
     }
-
+    // 计算实际回看阈值
     const double required_chord =
         std::isfinite(lookback_distance)
             ? std::max(lookback_distance, kMinChordLength)
             : kMinChordLength;
     bool found_direction = false;
     double candidate = 0.0;
+    // 反向遍历路径
     for (size_t index = last; index-- > 0;)
     {
+        // 如果路径点无效，直接跳过
         if (!std::isfinite(path_x[index]) || !std::isfinite(path_y[index]))
         {
             continue;
@@ -311,7 +315,7 @@ bool tryCalculateTerminalPathYaw(const std::vector<double>& path_x,
         {
             continue;
         }
-
+        // 计算候选方向 atan2(dy, dx) 得到从候选点指向终点的方向，范围通常为 [-π, π]
         candidate = std::atan2(dy, dx);
         found_direction = true;
         if (chord >= required_chord)

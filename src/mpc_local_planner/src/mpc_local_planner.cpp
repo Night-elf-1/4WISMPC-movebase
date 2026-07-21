@@ -367,27 +367,31 @@ bool MpcLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& pla
         movingAverage(terminal_path_x, path_smooth_window_);
     std::vector<double> smoothed_terminal_y =
         movingAverage(terminal_path_y, path_smooth_window_);
+    // 将平滑后的路径首尾点设置为原始路径的首尾点，确保终点位置不被平滑操作改变
     smoothed_terminal_x.front() = terminal_path_x.front();
     smoothed_terminal_x.back() = terminal_path_x.back();
     smoothed_terminal_y.front() = terminal_path_y.front();
     smoothed_terminal_y.back() = terminal_path_y.back();
-
+    // 计算终点路径的航向角
     double terminal_path_yaw = 0.0;
+    // 估计“路径终点处的行驶方向”
     const bool terminal_path_yaw_valid = tryCalculateTerminalPathYaw(
         smoothed_terminal_x, smoothed_terminal_y,
         terminal_path_yaw_lookback_, terminal_path_yaw);
-
+    // 从“目标点的四元数姿态”中提取目标航向角 yaw   NaN 表示当前还没有可用的目标航向角
     double requested_goal_yaw = std::numeric_limits<double>::quiet_NaN();
     if (goal_orientation_provided)
     {
+        // 从目标点的四元数姿态中提取目标航向角 yaw
         requested_goal_yaw = getYaw(normalized_goal.orientation);
     }
+    // 如果目标点提供了四元数姿态，但无法提取出有效的航向角，则发出警告，表示将视为未提供目标航向角
     if (goal_orientation_provided && !std::isfinite(requested_goal_yaw))
     {
         ROS_WARN("MpcLocalPlanner could not extract a valid yaw from the transformed "
                  "goal orientation; it will be treated as unavailable.");
     }
-
+    // 根据 goal_yaw_mode_ 和路径终点的航向角，选择最终的目标航向角
     const GoalYawSelection selected_goal_yaw = selectGoalYaw(
         goal_yaw_mode_, requested_goal_yaw,
         terminal_path_yaw_valid, terminal_path_yaw);
@@ -442,7 +446,7 @@ bool MpcLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& pla
     }
     else
     {
-        updateStateForNewPlan();
+        updateStateForNewPlan();    // 根据新路径和新目标更新状态机状态
     }
 
     // 调用 mpc_->reset()，重置 MPC 内部上一拍控制量
